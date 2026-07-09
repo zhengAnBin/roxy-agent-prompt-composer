@@ -1,9 +1,28 @@
 <script setup>
 import { ref } from 'vue'
 import PromptComposer from './components/PromptComposer.vue'
+import TokenContent from './components/TokenContent.vue'
 
 const submissions = ref([])
 const selectedResources = ref([])
+const composerRef = ref(null)
+
+const profileOptions = [
+  {
+    id: 'profile-frontend',
+    type: 'profile',
+    title: 'Frontend Reviewer',
+    description: '检查 UI、交互和可访问性',
+    icon: '👤',
+  },
+  {
+    id: 'profile-debugger',
+    type: 'profile',
+    title: 'Debugger',
+    description: '定位 bug 并给出修复路径',
+    icon: '👤',
+  },
+]
 
 const resources = {
   agents: [
@@ -104,6 +123,39 @@ const resources = {
     },
   ],
 }
+
+const promptTemplates = [
+  {
+    id: 'profile-command',
+    title: 'Profile 执行',
+    content: '请选择 [@profile:target] 窗口，然后执行 [:用户输入]',
+    slots: {
+      'profile:target': {
+        label: 'Profile 窗口',
+        placeholder: '选择 Profile',
+        options: profileOptions,
+      },
+      用户输入: {
+        placeholder: '输入要执行的操作',
+      },
+    },
+  },
+  {
+    id: 'review-file',
+    title: '文件审查',
+    content: '请审查 [@file:target]，重点关注 [:审查重点]',
+    slots: {
+      'file:target': {
+        label: '目标文件',
+        placeholder: '选择文件',
+        options: resources.files,
+      },
+      审查重点: {
+        placeholder: '例如状态同步、边界条件、交互细节',
+      },
+    },
+  },
+]
 
 function createProvider(name, items, latency = 80) {
   return {
@@ -206,10 +258,15 @@ const providers = [
 function handleSubmit(payload) {
   const message = typeof payload === 'string' ? payload : payload.text
   const attachments = typeof payload === 'string' ? [] : payload.attachments
+  const blocks = typeof payload === 'string'
+    ? [{ type: 'text', text: payload }]
+    : payload.blocks || [{ type: 'text', text: message }]
 
   submissions.value.unshift({
     id: crypto.randomUUID(),
     message,
+    blocks,
+    resources: typeof payload === 'string' ? [] : payload.resources || [],
     attachments,
     createdAt: new Date().toLocaleTimeString([], {
       hour: '2-digit',
@@ -222,6 +279,73 @@ function handleResourceSelect(resource) {
   selectedResources.value.unshift(resource)
   selectedResources.value = selectedResources.value.slice(0, 5)
 }
+
+function getTokenActions(block, context) {
+  if (context.surface === 'message') {
+    return [
+      { id: 'refill-message', label: '回填整条消息', icon: '↩' },
+      { id: 'refill-token', label: '只回填这个项', icon: '+' },
+    ]
+  }
+
+  return [
+    { id: 'inspect-token', label: '查看数据', icon: 'i' },
+  ]
+}
+
+function handleTokenAction({ action, block, context }) {
+  if (action.id === 'refill-message' && context?.submission) {
+    refillSubmission(context.submission)
+    return
+  }
+
+  if (action.id === 'refill-token') {
+    composerRef.value?.setContent({ blocks: [block] })
+    return
+  }
+
+  if (action.id === 'inspect-token') {
+    selectedResources.value.unshift({
+      id: block.resource?.id || block.slot?.id || crypto.randomUUID(),
+      type: block.resource?.type || block.slot?.kind || 'token',
+      title: block.resource?.title || block.slot?.label || 'Token',
+      icon: block.resource?.icon || block.slot?.icon || '#',
+    })
+    selectedResources.value = selectedResources.value.slice(0, 5)
+  }
+}
+
+function getSubmissionBlocks(submission) {
+  if (submission.blocks?.length) {
+    return submission.blocks
+  }
+
+  return [{ type: 'text', text: submission.message }]
+}
+
+function getBlockKey(submission, block, index) {
+  if (block.type === 'resource') {
+    return `${submission.id}:resource:${block.resource?.type}:${block.resource?.id}:${index}`
+  }
+
+  if (block.type === 'slot') {
+    return `${submission.id}:slot:${block.slot?.id}:${index}`
+  }
+
+  return `${submission.id}:text:${index}`
+}
+
+function refillSubmission(submission) {
+  composerRef.value?.setContent({
+    text: submission.message,
+    blocks: getSubmissionBlocks(submission),
+    attachments: submission.attachments || [],
+  })
+}
+
+function applyTemplate(template) {
+  composerRef.value?.setTemplate(template)
+}
 </script>
 
 <template>
@@ -232,10 +356,22 @@ function handleResourceSelect(resource) {
           <article
             v-for="submission in submissions"
             :key="submission.id"
-            class="conversation-message"
+            class="conversation-message conversation-message--editable"
+            role="button"
+            tabindex="0"
+            title="回填到输入框"
+            @click="refillSubmission(submission)"
+            @keydown.enter.prevent="refillSubmission(submission)"
           >
-            <span>{{ submission.createdAt }}</span>
-            <p>{{ submission.message }}</p>
+            <span class="conversation-message__time">{{ submission.createdAt }}</span>
+            <div class="conversation-message__content">
+              <TokenContent
+                :blocks="getSubmissionBlocks(submission)"
+                :context="{ surface: 'message', submission }"
+                :token-actions="getTokenActions"
+                @token-action="handleTokenAction"
+              />
+            </div>
             <div v-if="submission.attachments?.length" class="submitted-attachments">
               <span
                 v-for="attachment in submission.attachments"
@@ -260,14 +396,29 @@ function handleResourceSelect(resource) {
             {{ resource.icon }} {{ resource.title }}
           </span>
         </div>
+
+        <div class="template-strip">
+          <button
+            v-for="template in promptTemplates"
+            :key="template.id"
+            type="button"
+            class="template-pill"
+            @click="applyTemplate(template)"
+          >
+            {{ template.title }}
+          </button>
+        </div>
       </div>
 
       <div class="conversation__composer">
         <PromptComposer
+          ref="composerRef"
           :providers="providers"
+          :token-actions="getTokenActions"
           placeholder="询问 Codex"
           @submit="handleSubmit"
           @resource-select="handleResourceSelect"
+          @token-action="handleTokenAction"
         />
       </div>
     </section>

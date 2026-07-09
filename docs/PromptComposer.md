@@ -1,5 +1,7 @@
 # PromptComposer 组件文档
 
+> 说明：这份文档记录的是较早的 Resource Picker / 附件版本说明。最新的结构化 token、模板槽位、事件和方法 API 请以 [`API.zh-CN.md`](API.zh-CN.md) 和 [`API.en.md`](API.en.md) 为准。
+
 一个类 Codex/Cursor 的输入框组件：支持富文本编辑区（`contenteditable`）、`@` 唤起资源选择菜单、文件/文件夹附件、拖拽上传、中文输入法合成、以及**可异步加载**的资源 provider。
 
 - 组件路径：`src/components/PromptComposer.vue`
