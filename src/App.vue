@@ -5,6 +5,7 @@ import TokenContent from './components/TokenContent.vue'
 
 const submissions = ref([])
 const selectedResources = ref([])
+const selectedCommands = ref([])
 const composerRef = ref(null)
 
 const profileOptions = [
@@ -123,6 +124,100 @@ const resources = {
     },
   ],
 }
+
+const slashCommands = [
+  {
+    id: 'mcp',
+    type: 'command',
+    title: 'MCP',
+    description: '显示 MCP 服务器状态',
+    icon: '⌁',
+    group: '命令',
+    keywords: ['mcp', 'server', '服务器', '状态'],
+  },
+  {
+    id: 'personality',
+    type: 'command',
+    title: '个性',
+    description: '选择 Codex 的回应方式',
+    icon: '◉',
+    group: '命令',
+    keywords: ['personality', 'style', '个性', '回应'],
+  },
+  {
+    id: 'side-conversation',
+    type: 'command',
+    title: '侧边',
+    description: '在临时分支中发起侧边对话',
+    icon: '+',
+    group: '命令',
+    keywords: ['side', 'branch', '侧边', '分支'],
+  },
+  {
+    id: 'feedback',
+    type: 'command',
+    title: '反馈',
+    description: '发送有关此聊天的反馈',
+    icon: '□',
+    group: '命令',
+    keywords: ['feedback', '反馈'],
+  },
+  {
+    id: 'reasoning',
+    type: 'command',
+    title: '推理',
+    description: '高',
+    icon: '◌',
+    group: '命令',
+    keywords: ['reasoning', '推理', '高'],
+  },
+  {
+    id: 'model',
+    type: 'command',
+    title: '模型',
+    description: 'GPT-5.5',
+    icon: '⬡',
+    group: '命令',
+    keywords: ['model', 'gpt', '模型'],
+  },
+  {
+    id: 'status',
+    type: 'command',
+    title: '状态',
+    description: '显示对话 ID、上下文使用情况及额度限制',
+    icon: '◔',
+    group: '命令',
+    keywords: ['status', '状态', 'context', 'quota'],
+  },
+  {
+    id: 'goal',
+    type: 'command',
+    title: '目标',
+    description: '设置 Codex 将持续努力实现的目标',
+    icon: '◎',
+    group: '命令',
+    keywords: ['goal', '目标'],
+    insertText: '设置目标：[:目标内容]',
+  },
+  {
+    id: 'plan-mode',
+    type: 'command',
+    title: '计划模式',
+    description: '开启计划模式',
+    icon: '☑',
+    group: '命令',
+    keywords: ['plan', '计划模式'],
+  },
+  {
+    id: 'memory',
+    type: 'command',
+    title: '记忆',
+    description: '生成开',
+    icon: '◌',
+    group: '命令',
+    keywords: ['memory', '记忆'],
+  },
+]
 
 const promptTemplates = [
   {
@@ -248,11 +343,15 @@ function createProfileProvider() {
   }
 }
 
-const providers = [
+const atProviders = [
   createProvider('Agents', resources.agents),
   createProvider('Workspace files', resources.files, 120),
   createProvider('Tools and memory', resources.tools, 50),
   createProfileProvider(),
+]
+
+const slashProviders = [
+  createProvider('Slash commands', slashCommands, 20),
 ]
 
 function handleSubmit(payload) {
@@ -278,6 +377,11 @@ function handleSubmit(payload) {
 function handleResourceSelect(resource) {
   selectedResources.value.unshift(resource)
   selectedResources.value = selectedResources.value.slice(0, 5)
+}
+
+function handleCommandSelect(command) {
+  selectedCommands.value.unshift(command)
+  selectedCommands.value = selectedCommands.value.slice(0, 5)
 }
 
 function getTokenActions(block, context) {
@@ -383,7 +487,7 @@ function applyTemplate(template) {
           </article>
           <article v-if="!submissions.length" class="conversation-message conversation-message--empty">
             <span>网页预览</span>
-            <p>在底部输入框输入 @ 添加资源。选择一个资源后，可以继续输入空格再 @ 添加第二个资源。</p>
+            <p>在底部输入框输入 @ 添加资源，输入 / 打开命令菜单。</p>
           </article>
         </div>
 
@@ -394,6 +498,16 @@ function applyTemplate(template) {
             class="selected-resource"
           >
             {{ resource.icon }} {{ resource.title }}
+          </span>
+        </div>
+
+        <div v-if="selectedCommands.length" class="selected-resources">
+          <span
+            v-for="command in selectedCommands"
+            :key="`command:${command.id}`"
+            class="selected-resource"
+          >
+            / {{ command.title }}
           </span>
         </div>
 
@@ -413,11 +527,13 @@ function applyTemplate(template) {
       <div class="conversation__composer">
         <PromptComposer
           ref="composerRef"
-          :providers="providers"
+          :at-providers="atProviders"
+          :slash-providers="slashProviders"
           :token-actions="getTokenActions"
           placeholder="询问 Codex"
           @submit="handleSubmit"
           @resource-select="handleResourceSelect"
+          @command-select="handleCommandSelect"
           @token-action="handleTokenAction"
         />
       </div>

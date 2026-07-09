@@ -11,6 +11,18 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  trigger: {
+    type: String,
+    default: '@',
+  },
+  emptyLabel: {
+    type: String,
+    default: '添加',
+  },
+  noResultsLabel: {
+    type: String,
+    default: 'No resources found',
+  },
 })
 
 const emit = defineEmits(['select', 'close'])
@@ -138,7 +150,7 @@ function onKeydown(event) {
   }
 }
 
-watch(normalizedKeyword, searchResources, { immediate: true })
+watch([normalizedKeyword, () => props.providers], searchResources, { immediate: true })
 
 defineExpose({
   onKeydown,
@@ -148,14 +160,15 @@ defineExpose({
 <template>
   <div class="resource-picker">
     <div class="resource-picker__header">
-      <span class="resource-picker__trigger">@</span>
-      <span class="resource-picker__query">{{ keyword || '添加' }}</span>
+      <span class="resource-picker__trigger">{{ trigger }}</span>
+      <span class="resource-picker__query">{{ keyword || emptyLabel }}</span>
     </div>
     <ResourceList
       :groups="groupedResources"
       :active-index="activeIndex"
       :loading="anyLoading"
       :keyword="keyword"
+      :empty-label="noResultsLabel"
       @hover="activeIndex = $event"
       @select="choose"
     />

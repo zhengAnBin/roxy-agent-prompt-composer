@@ -18,7 +18,11 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import ResourcePicker from './popup/ResourcePicker.vue'
 
 const props = defineProps({
-  providers: {
+  atProviders: {
+    type: Array,
+    default: () => [],
+  },
+  slashProviders: {
     type: Array,
     default: () => [],
   },
@@ -36,7 +40,7 @@ const props = defineProps({
   },
 })
 
-const emit = defineEmits(['submit', 'stop', 'resource-select', 'token-hover', 'token-click', 'token-action', 'token-update'])
+const emit = defineEmits(['submit', 'stop', 'resource-select', 'command-select', 'token-hover', 'token-click', 'token-action', 'token-update'])
 
 const editorRef = ref(null)
 const fileInputRef = ref(null)
@@ -44,6 +48,7 @@ const folderInputRef = ref(null)
 const pickerRef = ref(null)
 const pickerOpen = ref(false)
 const pickerMode = ref(null)
+const pickerTrigger = ref('@')
 const triggerRange = ref(null)
 const draftText = ref('')
 const pickerKeyword = ref('')
@@ -57,6 +62,9 @@ let editorObserver = null
 const CLIPBOARD_BLOCKS_MIME = 'application/x-prompt-composer-blocks'
 
 const canSubmit = computed(() => draftText.value.trim().length > 0 || attachments.value.length > 0)
+const pickerProviders = computed(() => pickerTrigger.value === '/' ? props.slashProviders : props.atProviders)
+const pickerEmptyLabel = computed(() => pickerTrigger.value === '/' ? '命令' : '添加')
+const pickerNoResultsLabel = computed(() => pickerTrigger.value === '/' ? 'No commands found' : 'No resources found')
 
 function updateDraftText() {
   draftText.value = editorRef.value?.innerText.replace(/\u00a0/g, ' ') || ''
@@ -635,6 +643,7 @@ function insertNodeAtSelection(node) {
 function closePicker() {
   pickerOpen.value = false
   pickerMode.value = null
+  pickerTrigger.value = '@'
   triggerRange.value = null
   pickerKeyword.value = ''
 }
@@ -642,6 +651,7 @@ function closePicker() {
 function openToolbarPicker() {
   focusEditor()
   pickerMode.value = 'toolbar'
+  pickerTrigger.value = '@'
   triggerRange.value = null
   pickerKeyword.value = ''
   pickerOpen.value = true
@@ -670,7 +680,50 @@ function removeTriggerToken() {
   updateDraftText()
 }
 
-function getMentionTokenFromCaret() {
+function getTextPositionAtOffset(root, targetOffset) {
+  let currentOffset = 0
+  let fallback = null
+
+  function walk(node) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const textLength = node.textContent?.length || 0
+      fallback = { node, offset: textLength }
+
+      if (currentOffset + textLength >= targetOffset) {
+        return {
+          node,
+          offset: Math.max(0, targetOffset - currentOffset),
+        }
+      }
+
+      currentOffset += textLength
+      return null
+    }
+
+    if (node.nodeName === 'BR') {
+      if (currentOffset === targetOffset) {
+        return fallback
+      }
+
+      currentOffset += 1
+      return null
+    }
+
+    for (const child of node.childNodes) {
+      const position = walk(child)
+
+      if (position) {
+        return position
+      }
+    }
+
+    return null
+  }
+
+  return walk(root)
+}
+
+function getTriggerTokenFromCaret() {
   const editor = editorRef.value
   const selection = window.getSelection()
 
@@ -679,49 +732,56 @@ function getMentionTokenFromCaret() {
   }
 
   const currentRange = selection.getRangeAt(0)
-  let textNode = currentRange.endContainer
-  let textOffset = currentRange.endOffset
 
-  if (textNode.nodeType === Node.ELEMENT_NODE && textOffset > 0) {
-    const previousNode = textNode.childNodes[textOffset - 1]
-
-    if (previousNode?.nodeType === Node.TEXT_NODE) {
-      textNode = previousNode
-      textOffset = previousNode.textContent?.length || 0
-    }
-  }
-
-  if (textNode.nodeType !== Node.TEXT_NODE || !editor.contains(textNode)) {
+  if (!editor.contains(currentRange.endContainer)) {
     return null
   }
 
-  const beforeCaret = textNode.textContent.slice(0, textOffset)
-  const tokenMatch = beforeCaret.match(/(?:^|[\s\u00a0])(@[^\s\u00a0]*)$/)
+  const beforeRange = document.createRange()
+  beforeRange.setStart(editor, 0)
+  beforeRange.setEnd(currentRange.endContainer, currentRange.endOffset)
+
+  const beforeCaret = beforeRange.toString()
+  const tokenMatch = beforeCaret.match(/(?:^|[\s\u00a0])([@/][^\s\u00a0]*)$/)
 
   if (!tokenMatch) {
     return null
   }
 
   const tokenStart = beforeCaret.length - tokenMatch[1].length
+  const tokenPosition = getTextPositionAtOffset(editor, tokenStart)
+
+  if (!tokenPosition) {
+    return null
+  }
+
+  const tokenNodeLength = tokenPosition.node.textContent?.length || 0
+
+  if (tokenPosition.offset >= tokenNodeLength) {
+    return null
+  }
+
   const nextRange = document.createRange()
-  nextRange.setStart(textNode, tokenStart)
-  nextRange.setEnd(textNode, tokenStart + 1)
+  nextRange.setStart(tokenPosition.node, tokenPosition.offset)
+  nextRange.setEnd(tokenPosition.node, tokenPosition.offset + 1)
   return {
+    trigger: tokenMatch[1][0],
     keyword: tokenMatch[1].slice(1),
     range: nextRange,
   }
 }
 
 function openPicker() {
-  const mentionToken = getMentionTokenFromCaret()
+  const triggerToken = getTriggerTokenFromCaret()
 
-  if (!mentionToken) {
+  if (!triggerToken) {
     return
   }
 
   pickerMode.value = 'trigger'
-  triggerRange.value = mentionToken.range
-  pickerKeyword.value = mentionToken.keyword
+  pickerTrigger.value = triggerToken.trigger
+  triggerRange.value = triggerToken.range
+  pickerKeyword.value = triggerToken.keyword
   pickerOpen.value = true
 }
 
@@ -777,6 +837,33 @@ function replaceTriggerWithResource(resource) {
   emit('resource-select', resource)
 }
 
+function runCommand(command) {
+  if (triggerRange.value) {
+    removeTriggerToken()
+  }
+
+  closePicker()
+
+  if (command.template) {
+    setTemplate(command.template)
+  } else if (command.insertText) {
+    insertBlocksAtSelection(parseClipboardTextToBlocks(command.insertText))
+  }
+
+  emit('command-select', command)
+  updateDraftText()
+  keepEditorScrolledToBottom()
+}
+
+function handlePickerSelect(item) {
+  if (pickerTrigger.value === '/') {
+    runCommand(item)
+    return
+  }
+
+  replaceTriggerWithResource(item)
+}
+
 function insertPlainText(text) {
   insertNodeAtSelection(document.createTextNode(text))
   updateDraftText()
@@ -816,12 +903,13 @@ function submit() {
 }
 
 function updatePickerKeyword() {
-  const mentionToken = getMentionTokenFromCaret()
+  const triggerToken = getTriggerTokenFromCaret()
 
-  if (mentionToken) {
+  if (triggerToken) {
     pickerMode.value = 'trigger'
-    triggerRange.value = mentionToken.range
-    pickerKeyword.value = mentionToken.keyword
+    pickerTrigger.value = triggerToken.trigger
+    triggerRange.value = triggerToken.range
+    pickerKeyword.value = triggerToken.keyword
     pickerOpen.value = true
     return
   }
@@ -1251,10 +1339,14 @@ defineExpose({
     >
     <div v-if="pickerOpen" class="prompt-composer__picker" @click.stop>
       <ResourcePicker
+        :key="pickerTrigger"
         ref="pickerRef"
-        :providers="providers"
+        :providers="pickerProviders"
         :keyword="pickerKeyword"
-        @select="replaceTriggerWithResource"
+        :trigger="pickerTrigger"
+        :empty-label="pickerEmptyLabel"
+        :no-results-label="pickerNoResultsLabel"
+        @select="handlePickerSelect"
         @close="closePicker"
       />
     </div>

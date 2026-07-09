@@ -127,12 +127,12 @@ const template = {
 }
 ```
 
-## Resource Provider
+## At Provider
 
-`providers` 驱动 `@` 资源菜单。组件只负责打开菜单、传入 keyword、插入返回资源。
+`atProviders` 驱动 `@` 资源菜单。组件只负责打开菜单、传入 keyword、插入返回资源。
 
 ```ts
-interface ResourceProvider {
+interface AtProvider {
   name: string
   group?: string
   search(keyword: string): Resource[] | Promise<Resource[]>
@@ -142,7 +142,7 @@ interface ResourceProvider {
 示例：
 
 ```js
-const providers = [
+const atProviders = [
   {
     name: 'Files',
     async search(keyword) {
@@ -157,6 +157,52 @@ const providers = [
 ]
 ```
 
+## Slash Provider
+
+`slashProviders` 驱动 `/` 命令菜单。它复用 provider 契约，因此每个 command 也是一个 `Resource` 形状的对象，但选择后的行为不同：命令不会插入 resource chip，而是移除 `/keyword` 并触发 `command-select`。
+
+```ts
+interface SlashProvider {
+  name: string
+  group?: string
+  search(keyword: string): Command[] | Promise<Command[]>
+}
+
+interface Command extends Resource {
+  template?: string | { content: string; slots?: Record<string, Partial<PromptSlot>> }
+  insertText?: string
+}
+```
+
+命令行为：
+
+| 字段 | 行为 |
+| --- | --- |
+| `template` | 选择命令后调用 `setTemplate(template)`。 |
+| `insertText` | 选择命令后解析为模板文本并插入当前光标位置。 |
+| 无额外字段 | 只触发 `command-select`，由外部处理。 |
+
+示例：
+
+```js
+const slashProviders = [
+  {
+    name: 'Slash commands',
+    async search(keyword) {
+      const commands = [
+        { id: 'model', type: 'command', title: '模型', description: 'GPT-5.5', icon: '⬡' },
+        { id: 'goal', type: 'command', title: '目标', insertText: '设置目标：[:目标内容]', icon: '◎' },
+      ]
+
+      return commands.filter((command) => {
+        const text = `${command.title} ${command.description || ''}`.toLowerCase()
+        return !keyword || text.includes(keyword)
+      })
+    },
+  },
+]
+```
+
 ## `<PromptComposer />`
 
 主输入框组件。
@@ -165,7 +211,8 @@ const providers = [
 
 | Prop | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `providers` | `ResourceProvider[]` | `[]` | `@` 菜单的数据源。 |
+| `atProviders` | `AtProvider[]` | `[]` | `@` 菜单的数据源。Vue 模板中写作 `at-providers`。 |
+| `slashProviders` | `SlashProvider[]` | `[]` | `/` 命令菜单的数据源。Vue 模板中写作 `slash-providers`。 |
 | `tokenActions` | `TokenAction[] \| (block, context) => TokenAction[]` | `[]` | token popup 菜单项。 |
 | `placeholder` | `string` | `'Ask Codex to code, explain, or inspect...'` | 输入框 placeholder。 |
 | `running` | `boolean` | `false` | 为 `true` 时右下角显示停止按钮。 |
@@ -177,6 +224,7 @@ const providers = [
 | `submit` | `SubmitPayload` | 用户发送时触发。 |
 | `stop` | 无 | `running=true` 时点击停止按钮触发。 |
 | `resource-select` | `Resource` | 从 `@` 菜单选择资源并插入后触发。 |
+| `command-select` | `Command` | 从 `/` 菜单选择命令后触发。 |
 | `token-hover` | `{ block, surface: 'editor' }` | 鼠标 hover 编辑区 token。 |
 | `token-click` | `{ block, surface: 'editor' }` | 点击编辑区 token。 |
 | `token-action` | `{ action, block, surface: 'editor' }` | 点击编辑区 token popup 菜单项。 |
@@ -303,7 +351,7 @@ import TokenContent from './components/TokenContent.vue'
 const composerRef = ref(null)
 const messages = ref([])
 
-const providers = [
+const atProviders = [
   {
     name: 'Files',
     async search(keyword) {
@@ -328,7 +376,7 @@ function handleSubmit(payload) {
 
   <PromptComposer
     ref="composerRef"
-    :providers="providers"
+    :at-providers="atProviders"
     @submit="handleSubmit"
   />
 </template>

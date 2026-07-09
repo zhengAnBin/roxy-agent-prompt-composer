@@ -19,6 +19,10 @@ const props = defineProps({
     type: String,
     default: '',
   },
+  emptyLabel: {
+    type: String,
+    default: 'No resources found',
+  },
 })
 
 const emit = defineEmits(['hover', 'select'])
@@ -60,7 +64,7 @@ watch(
     </template>
     <div v-else-if="loading" class="resource-list__empty">Searching...</div>
     <div v-else class="resource-list__empty">
-      No resources found<span v-if="keyword"> for "{{ keyword }}"</span>
+      {{ emptyLabel }}<span v-if="keyword"> for "{{ keyword }}"</span>
     </div>
   </div>
 </template>

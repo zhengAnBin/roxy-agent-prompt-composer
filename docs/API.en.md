@@ -127,12 +127,12 @@ const template = {
 }
 ```
 
-## Resource Provider
+## At Provider
 
-`providers` power the `@` Resource Picker. The composer only opens the picker, passes the keyword, and inserts the returned resource.
+`atProviders` power the `@` Resource Picker. The composer only opens the picker, passes the keyword, and inserts the returned resource.
 
 ```ts
-interface ResourceProvider {
+interface AtProvider {
   name: string
   group?: string
   search(keyword: string): Resource[] | Promise<Resource[]>
@@ -142,7 +142,7 @@ interface ResourceProvider {
 Example:
 
 ```js
-const providers = [
+const atProviders = [
   {
     name: 'Files',
     async search(keyword) {
@@ -157,6 +157,52 @@ const providers = [
 ]
 ```
 
+## Slash Provider
+
+`slashProviders` power the `/` command menu. It reuses the same provider contract, so each command is also shaped like a `Resource`. Selection behaves differently from `@`: the command removes `/keyword`, does not insert a resource chip, and emits `command-select`.
+
+```ts
+interface SlashProvider {
+  name: string
+  group?: string
+  search(keyword: string): Command[] | Promise<Command[]>
+}
+
+interface Command extends Resource {
+  template?: string | { content: string; slots?: Record<string, Partial<PromptSlot>> }
+  insertText?: string
+}
+```
+
+Command behavior:
+
+| Field | Behavior |
+| --- | --- |
+| `template` | Calls `setTemplate(template)` after selection. |
+| `insertText` | Parses the string as template text and inserts it at the caret. |
+| no extra field | Only emits `command-select`; the host app handles the action. |
+
+Example:
+
+```js
+const slashProviders = [
+  {
+    name: 'Slash commands',
+    async search(keyword) {
+      const commands = [
+        { id: 'model', type: 'command', title: 'Model', description: 'GPT-5.5', icon: '⬡' },
+        { id: 'goal', type: 'command', title: 'Goal', insertText: 'Set goal: [:goal]', icon: '◎' },
+      ]
+
+      return commands.filter((command) => {
+        const text = `${command.title} ${command.description || ''}`.toLowerCase()
+        return !keyword || text.includes(keyword)
+      })
+    },
+  },
+]
+```
+
 ## `<PromptComposer />`
 
 The main editor component.
@@ -165,7 +211,8 @@ The main editor component.
 
 | Prop | Type | Default | Description |
 | --- | --- | --- | --- |
-| `providers` | `ResourceProvider[]` | `[]` | Data sources for the `@` picker. |
+| `atProviders` | `AtProvider[]` | `[]` | Data sources for the `@` picker. In Vue templates, use `at-providers`. |
+| `slashProviders` | `SlashProvider[]` | `[]` | Data sources for the `/` command menu. In Vue templates, use `slash-providers`. |
 | `tokenActions` | `TokenAction[] \| (block, context) => TokenAction[]` | `[]` | Popup menu items for tokens. |
 | `placeholder` | `string` | `'Ask Codex to code, explain, or inspect...'` | Editor placeholder. |
 | `running` | `boolean` | `false` | When `true`, the lower-right button becomes a stop button. |
@@ -177,6 +224,7 @@ The main editor component.
 | `submit` | `SubmitPayload` | Emitted when the user sends the prompt. |
 | `stop` | none | Emitted when the stop button is clicked while `running=true`. |
 | `resource-select` | `Resource` | Emitted after a resource is selected from the `@` picker and inserted. |
+| `command-select` | `Command` | Emitted after a command is selected from the `/` menu. |
 | `token-hover` | `{ block, surface: 'editor' }` | Hover over a token in the editor. |
 | `token-click` | `{ block, surface: 'editor' }` | Click a token in the editor. |
 | `token-action` | `{ action, block, surface: 'editor' }` | Click an item in an editor token popup. |
@@ -303,7 +351,7 @@ import TokenContent from './components/TokenContent.vue'
 const composerRef = ref(null)
 const messages = ref([])
 
-const providers = [
+const atProviders = [
   {
     name: 'Files',
     async search(keyword) {
@@ -328,7 +376,7 @@ function handleSubmit(payload) {
 
   <PromptComposer
     ref="composerRef"
-    :providers="providers"
+    :at-providers="atProviders"
     @submit="handleSubmit"
   />
 </template>
