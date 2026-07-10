@@ -26,3 +26,15 @@ Primary components:
 - `src/components/popup/ResourcePicker.vue`
 - `src/components/popup/ResourceList.vue`
 - `src/components/popup/ResourceItem.vue`
+
+## Deployment
+
+This project deploys to GitHub Pages with GitHub Actions. In the repository settings, open **Pages** and set **Build and deployment** > **Source** to **GitHub Actions**.
+
+Every push to `main` runs `.github/workflows/deploy-pages.yml`, builds the Vite app, and publishes `dist/` with the official GitHub Pages artifact flow.
+
+Expected project site path:
+
+```text
+https://zhenganbin.github.io/roxy-agent-prompt-composer/
+```
