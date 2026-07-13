@@ -1,7 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import PromptComposer from './components/PromptComposer.vue'
-import TokenContent from './components/TokenContent.vue'
+import { PromptComposer, TokenContent } from './prompt-composer'
 
 const submissions = ref([])
 const selectedResources = ref([])
@@ -354,6 +353,54 @@ const slashProviders = [
   createProvider('Slash commands', slashCommands, 20),
 ]
 
+// 第三个触发符演示：`#` 打标签，选中后直接插入 chip（走默认 resource 行为）。
+const tags = [
+  { id: 'tag-bug', type: 'tag', title: 'bug', description: '缺陷', icon: '🏷', group: '标签' },
+  { id: 'tag-feature', type: 'tag', title: 'feature', description: '新功能', icon: '🏷', group: '标签' },
+  { id: 'tag-urgent', type: 'tag', title: 'urgent', description: '紧急', icon: '🔥', group: '标签' },
+]
+
+const tagProviders = [createProvider('Tags', tags, 30)]
+
+// 通用 directives 数组：@ / # 三个触发符全部数据驱动。
+// atProviders / slashProviders 仍可单独传，这里演示直接用 directives 一次声明。
+const directives = [
+  { trigger: '@', providers: atProviders },
+  { trigger: '/', providers: slashProviders },
+  { trigger: '#', name: 'tag', mode: 'resource', emptyLabel: '标签', providers: tagProviders },
+]
+
+// 自定义回显：按资源类型给 chip 上色 / 加副标题。
+// 返回 Tailwind 工具类；组件内置的 composer-chip 语义 class 仍在外层元素上，
+// 这里只演示消费者如何完全接管 chip 内部呈现。
+const CHIP_COLOR = {
+  profile: 'text-[#1b6ac2]',
+  file: 'text-[#2a7d4f]',
+  folder: 'text-[#2a7d4f]',
+  tag: 'text-[#a4432b]',
+}
+
+function chipClass(block) {
+  const type = block.resource?.type || block.slot?.value?.type || block.slot?.kind || 'text'
+  return `demo-chip inline-flex items-center gap-1.5 align-middle leading-tight ${CHIP_COLOR[type] || ''}`
+}
+
+function chipData(block) {
+  if (block.type === 'resource') {
+    return block.resource
+  }
+
+  if (block.type === 'slot' && block.slot?.kind === 'resource') {
+    return block.slot.value || { icon: '@', title: block.slot.placeholder || block.slot.label }
+  }
+
+  if (block.type === 'slot') {
+    return { icon: ':', title: block.slot.value || block.slot.label, hint: block.slot.value ? '' : '待填写' }
+  }
+
+  return { icon: '#', title: '' }
+}
+
 function handleSubmit(payload) {
   const message = typeof payload === 'string' ? payload : payload.text
   const attachments = typeof payload === 'string' ? [] : payload.attachments
@@ -453,70 +500,82 @@ function applyTemplate(template) {
 </script>
 
 <template>
-  <main class="app-shell">
-    <section class="conversation">
-      <div class="conversation__content">
-        <div class="conversation__messages" aria-live="polite">
+  <main class="app-shell min-h-screen bg-white">
+    <section class="conversation min-h-screen px-[22px] pt-0 pb-[150px] max-[720px]:px-2 max-[720px]:pb-[142px]">
+      <div class="conversation__content w-[min(100%,1474px)] mx-auto pt-0">
+        <div class="conversation__messages grid gap-4" aria-live="polite">
           <article
             v-for="submission in submissions"
             :key="submission.id"
-            class="conversation-message conversation-message--editable"
+            class="conversation-message conversation-message--editable min-h-[112px] px-7 pt-7 pb-6 bg-white border border-[#dedede] rounded-[30px] cursor-pointer hover:border-[#d6d6d6] hover:bg-[#fbfbfb] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#c7c9cc] focus-visible:outline-offset-[3px] max-[720px]:min-h-24 max-[720px]:p-5 max-[720px]:rounded-[22px]"
             role="button"
             tabindex="0"
             title="回填到输入框"
             @click="refillSubmission(submission)"
             @keydown.enter.prevent="refillSubmission(submission)"
           >
-            <span class="conversation-message__time">{{ submission.createdAt }}</span>
-            <div class="conversation-message__content">
+            <span class="conversation-message__time block mb-2.5 text-[#202124] text-base font-bold">{{ submission.createdAt }}</span>
+            <div class="conversation-message__content text-[#202124] text-[1.58rem] font-[650] leading-[1.34] whitespace-pre-wrap break-words max-[720px]:text-[1.05rem]">
               <TokenContent
                 :blocks="getSubmissionBlocks(submission)"
                 :context="{ surface: 'message', submission }"
                 :token-actions="getTokenActions"
                 @token-action="handleTokenAction"
-              />
+              >
+                <template #chip="{ block }">
+                  <span :class="chipClass(block)">
+                    <span class="demo-chip__icon">{{ chipData(block).icon }}</span>
+                    <span class="demo-chip__title font-bold">{{ chipData(block).title }}</span>
+                    <span v-if="chipData(block).hint" class="demo-chip__hint text-[#b06a12] text-[0.82em] font-semibold">{{ chipData(block).hint }}</span>
+                  </span>
+                </template>
+              </TokenContent>
             </div>
-            <div v-if="submission.attachments?.length" class="submitted-attachments">
+            <div v-if="submission.attachments?.length" class="submitted-attachments flex flex-wrap gap-2 mt-4">
               <span
                 v-for="attachment in submission.attachments"
                 :key="attachment.id"
+                class="px-2.5 py-1 text-[#5f6368] text-[0.9rem] font-medium bg-[#f7f7f7] border border-[#e6e6e6] rounded-full"
               >
                 {{ attachment.name }}
               </span>
             </div>
           </article>
-          <article v-if="!submissions.length" class="conversation-message conversation-message--empty">
+          <article
+            v-if="!submissions.length"
+            class="conversation-message conversation-message--empty min-h-[112px] px-7 pt-7 pb-6 text-[#8c8f94] bg-white border border-[#dedede] rounded-[30px] max-[720px]:min-h-24 max-[720px]:p-5 max-[720px]:rounded-[22px]"
+          >
             <span>网页预览</span>
-            <p>在底部输入框输入 @ 添加资源，输入 / 打开命令菜单。</p>
+            <p class="text-[#202124] text-[1.58rem] font-[650] leading-[1.34] max-[720px]:text-[1.05rem]">在底部输入框输入 @ 添加资源，输入 / 打开命令菜单，输入 # 添加标签。</p>
           </article>
         </div>
 
-        <div v-if="selectedResources.length" class="selected-resources">
+        <div v-if="selectedResources.length" class="selected-resources flex flex-wrap gap-2 mt-3">
           <span
             v-for="resource in selectedResources"
             :key="`${resource.type}:${resource.id}`"
-            class="selected-resource"
+            class="selected-resource inline-flex max-w-full min-h-[30px] items-center px-2.5 py-1 overflow-hidden text-[#5f6368] text-[0.9rem] whitespace-nowrap text-ellipsis bg-[#f7f7f7] border border-[#e6e6e6] rounded-full"
           >
             {{ resource.icon }} {{ resource.title }}
           </span>
         </div>
 
-        <div v-if="selectedCommands.length" class="selected-resources">
+        <div v-if="selectedCommands.length" class="selected-resources flex flex-wrap gap-2 mt-3">
           <span
             v-for="command in selectedCommands"
             :key="`command:${command.id}`"
-            class="selected-resource"
+            class="selected-resource inline-flex max-w-full min-h-[30px] items-center px-2.5 py-1 overflow-hidden text-[#5f6368] text-[0.9rem] whitespace-nowrap text-ellipsis bg-[#f7f7f7] border border-[#e6e6e6] rounded-full"
           >
             / {{ command.title }}
           </span>
         </div>
 
-        <div class="template-strip">
+        <div class="template-strip flex flex-wrap gap-2 mt-3">
           <button
             v-for="template in promptTemplates"
             :key="template.id"
             type="button"
-            class="template-pill"
+            class="template-pill inline-flex min-h-8 items-center px-3 py-1 text-[#4f5359] text-[0.92rem] font-semibold bg-[#f7f7f7] border border-[#e5e5e5] rounded-full cursor-pointer hover:bg-[#f0f1f2]"
             @click="applyTemplate(template)"
           >
             {{ template.title }}
@@ -524,18 +583,47 @@ function applyTemplate(template) {
         </div>
       </div>
 
-      <div class="conversation__composer">
+      <div class="conversation__composer fixed right-0 bottom-0 left-0 z-20 px-[23px] pb-6 bg-gradient-to-t from-white from-74% to-transparent max-[720px]:px-2 max-[720px]:pb-3.5">
         <PromptComposer
           ref="composerRef"
-          :at-providers="atProviders"
-          :slash-providers="slashProviders"
+          :directives="directives"
           :token-actions="getTokenActions"
-          placeholder="询问 Codex"
+          placeholder="询问 Codex（试试 @ 资源、/ 命令、# 标签）"
           @submit="handleSubmit"
           @resource-select="handleResourceSelect"
           @command-select="handleCommandSelect"
           @token-action="handleTokenAction"
-        />
+        >
+          <template #chip="{ block }">
+            <span :class="chipClass(block)">
+              <span class="demo-chip__icon">{{ chipData(block).icon }}</span>
+              <span class="demo-chip__title font-bold">{{ chipData(block).title }}</span>
+              <span v-if="chipData(block).hint" class="demo-chip__hint text-[#b06a12] text-[0.82em] font-semibold">{{ chipData(block).hint }}</span>
+            </span>
+          </template>
+          <template #picker-item="{ item, active, directive }">
+            <div
+              class="demo-picker-item grid grid-cols-[40px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-2 rounded-2xl"
+              :class="active ? 'demo-picker-item--active bg-[#eef4ff]' : ''"
+            >
+              <span
+                class="demo-picker-item__badge inline-flex w-[34px] h-[34px] items-center justify-center text-[1.2rem] rounded-[10px]"
+                :class="{
+                  'bg-[#f2f3f5]': directive?.trigger === '@',
+                  'bg-[#eef7f0]': directive?.trigger === '/',
+                  'bg-[#fdf1ec]': directive?.trigger === '#',
+                }"
+              >
+                {{ item.icon || '#' }}
+              </span>
+              <span class="demo-picker-item__body grid min-w-0 gap-0.5">
+                <span class="demo-picker-item__title overflow-hidden whitespace-nowrap text-ellipsis text-[#34373d] text-[1.2rem] font-semibold">{{ item.title }}</span>
+                <span v-if="item.description" class="demo-picker-item__desc overflow-hidden whitespace-nowrap text-ellipsis text-[#9a9da2] text-base">{{ item.description }}</span>
+              </span>
+              <span class="demo-picker-item__type text-[#b6b9be] text-[0.85rem] uppercase tracking-wide">{{ item.type }}</span>
+            </div>
+          </template>
+        </PromptComposer>
       </div>
     </section>
   </main>

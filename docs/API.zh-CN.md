@@ -129,7 +129,7 @@ const template = {
 
 ## At Provider
 
-`atProviders` 驱动 `@` 资源菜单。组件只负责打开菜单、传入 keyword、插入返回资源。
+`atProviders` 驱动 `@` 资源菜单。组件只负责打开菜单、传入 keyword、插入返回资源。它是 `directives` 的语法糖：未显式传 `directives` 时，`atProviders` 会被合成为默认的 `@` 指令。
 
 ```ts
 interface AtProvider {
@@ -203,6 +203,104 @@ const slashProviders = [
 ]
 ```
 
+## Directives（通用触发符）
+
+`@` 和 `/` 不是写死的，它们只是 `directives` 数组里的两条默认指令。你可以任意增删触发符（`#`、`:` 等），核心解析层按 `directives` 动态识别，无需改动组件代码。
+
+```ts
+interface Directive {
+  trigger: string                 // 单个触发字符，如 '@' '/' '#'
+  name?: string                   // 供调试/事件使用的名字
+  mode?: 'resource' | 'command'   // 默认选中行为：插入 chip / 执行命令
+  providers: Provider[]           // 该触发符的数据源（同 Provider 契约）
+  emptyLabel?: string             // 无关键词时 picker 头部提示
+  noResultsLabel?: string         // 无结果提示
+  onSelect?: (item, ctx) => void | boolean
+  // 自定义选中行为。返回 false = 阻止默认行为（仍会清理触发符、关闭菜单）；
+  // 其它返回值则在自定义逻辑后继续走 mode 对应的默认行为。
+  // ctx = { directive, trigger, keyword, surface: 'editor' }
+}
+```
+
+示例（三个触发符）：
+
+```js
+const directives = [
+  { trigger: '@', providers: atProviders },                          // 资源，默认插入 chip
+  { trigger: '/', providers: slashProviders },                       // 命令，默认执行命令
+  { trigger: '#', name: 'tag', mode: 'resource', providers: tagProviders }, // 自定义标签
+]
+```
+
+```vue
+<PromptComposer :directives="directives" @submit="onSubmit" />
+```
+
+**兼容性**：`atProviders` / `slashProviders` 继续可用。未传 `directives` 时，组件用它们合成默认的 `@`（resource）与 `/`（command）两条指令，旧代码零改动。
+
+## 回显自定义（Slots）
+
+组件遵循「核心解析 + UI 高度可定制」：token 回显和 picker 列表项都通过作用域插槽完全接管，序列化只读 `data-block`，因此自定义 UI **不影响数据模型**。
+
+| 插槽 | 作用域参数 | 说明 |
+| --- | --- | --- |
+| `#chip` | `{ block, surface }` | 自定义编辑区里每个 token 的回显。内部用 `contenteditable=false` 原子占位 + `Teleport` 把插槽挂进去，光标 / 选区 / 序列化不受影响。不提供时回退到内置「icon title」。 |
+| `#picker-item` | `{ item, active, directive }` | 自定义 `@` / `/` / 任意触发符的菜单列表项。不提供时回退到内置 `ResourceItem`。 |
+| `#toolbar-start` / `#toolbar-end` | 无 | 覆盖底部工具栏左 / 右两侧（默认是「+ 添加」「访问权限」与「模型 / 发送」按钮）。 |
+
+`<TokenContent />` 同样提供 `#chip` 插槽（作用域参数 `{ block, surface: 'message', context }`），保证编辑区与消息区回显一致。
+
+示例（按资源类型定制 chip + 自定义 picker item）：
+
+```vue
+<PromptComposer :directives="directives">
+  <template #chip="{ block }">
+    <span :class="`chip chip--${block.resource?.type || block.slot?.kind}`">
+      {{ block.resource?.icon }} {{ block.resource?.title }}
+    </span>
+  </template>
+  <template #picker-item="{ item, active, directive }">
+    <div :class="{ active }">
+      <img v-if="item.avatar" :src="item.avatar">
+      <span>{{ item.title }}</span>
+      <small>{{ directive.trigger }} · {{ item.type }}</small>
+    </div>
+  </template>
+</PromptComposer>
+```
+
+## 样式与移植
+
+组件用 **Tailwind CSS v4** 编写，样式全部是模板里的内联工具类，**不依赖任何 `.css` 文件**。因此把整个 `src/prompt-composer/` 目录复制到任意 Vue 3 + Tailwind v4 项目即可直接使用。
+
+- **前置条件**：宿主项目已安装并启用 Tailwind v4（`@import "tailwindcss"` + 扫描到该目录）。
+- **语义 class 钩子**：每个元素在工具类之外都保留了语义 class（如 `composer-chip`、`prompt-composer__editor`、`resource-item`、`composer-token--empty`），可用它们从外部覆盖样式：
+
+  ```css
+  /* 覆盖 chip 外观 */
+  .composer-chip { border-radius: 6px; background: #eef; }
+  /* 只改空槽位 */
+  .composer-token--empty { background: #fff0f0; }
+  ```
+
+- **完全接管**：若想彻底替换回显，用 `#chip` / `#picker-item` 插槽，语义 class 依然在外层元素上，两种方式可叠加。
+
+## 核心解析层
+
+所有 UI 无关的解析逻辑抽在 `src/prompt-composer/core/`，可脱离组件单独复用（如在服务端或测试中解析模板）：
+
+```js
+import {
+  parseTemplateToBlocks,   // 模板/剪贴板文本 -> Block[]
+  blocksToClipboardText,   // Block[] -> 模板文本
+  blocksToPlainText,       // Block[] -> 纯文本
+  serializeNodesToBlocks,  // DOM 节点 -> Block[]
+  normalizeDirectives,     // props -> Directive[]
+  detectTriggerAtCaret,    // 光标处触发符检测
+  defaultPresentation,     // 默认 icon/title/description
+} from './prompt-composer'
+```
+
 ## `<PromptComposer />`
 
 主输入框组件。
@@ -211,8 +309,9 @@ const slashProviders = [
 
 | Prop | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- |
-| `atProviders` | `AtProvider[]` | `[]` | `@` 菜单的数据源。Vue 模板中写作 `at-providers`。 |
-| `slashProviders` | `SlashProvider[]` | `[]` | `/` 命令菜单的数据源。Vue 模板中写作 `slash-providers`。 |
+| `directives` | `Directive[]` | `null` | 通用触发符数组。传入后完全接管触发符行为；不传则由 `atProviders`/`slashProviders` 合成默认 `@`/`/`。见 [Directives](#directives通用触发符)。 |
+| `atProviders` | `AtProvider[]` | `[]` | `@` 菜单的数据源（`directives` 的语法糖）。Vue 模板中写作 `at-providers`。 |
+| `slashProviders` | `SlashProvider[]` | `[]` | `/` 命令菜单的数据源（`directives` 的语法糖）。Vue 模板中写作 `slash-providers`。 |
 | `tokenActions` | `TokenAction[] \| (block, context) => TokenAction[]` | `[]` | token popup 菜单项。 |
 | `placeholder` | `string` | `'Ask Codex to code, explain, or inspect...'` | 输入框 placeholder。 |
 | `running` | `boolean` | `false` | 为 `true` 时右下角显示停止按钮。 |
@@ -268,6 +367,8 @@ interface Attachment {
 | `setTemplate(template)` | 解析并回填模板。支持 `{ content, slots, attachments }` 或直接传字符串。 |
 | `parseTemplate(content, slotConfig?)` | 把模板字符串解析为 `Block[]`。 |
 | `insertBlocks(blocks)` | 在当前光标位置插入 `Block[]`。 |
+| `focus()` | 聚焦编辑区。 |
+| `openPicker()` | 若光标正处于触发符输入中，打开对应菜单。 |
 
 示例：
 
@@ -345,8 +446,8 @@ function getTokenActions(block, context) {
 ```vue
 <script setup>
 import { ref } from 'vue'
-import PromptComposer from './components/PromptComposer.vue'
-import TokenContent from './components/TokenContent.vue'
+import { PromptComposer } from './prompt-composer'
+import { TokenContent } from './prompt-composer'
 
 const composerRef = ref(null)
 const messages = ref([])

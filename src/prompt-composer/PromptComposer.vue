@@ -14,10 +14,31 @@ import {
   Square,
   X,
 } from '@lucide/vue'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, useSlots } from 'vue'
 import ResourcePicker from './popup/ResourcePicker.vue'
+import {
+  blocksToPlainText,
+  collectResources,
+  collectSlots,
+  getBlockFromTokenElement,
+  serializeNodesToBlocks,
+} from './core/blocks.js'
+import {
+  applyTemplateSlotConfig,
+  blocksToClipboardText,
+  parseTemplateToBlocks,
+  resolveTemplateBlocks,
+} from './core/template.js'
+import { detectTriggerAtCaret, findDirective, normalizeDirectives } from './core/directives.js'
+import { defaultPresentation } from './core/presentation.js'
 
 const props = defineProps({
+  // 通用指令数组：完全数据驱动的触发符（@ / # : ...）。
+  // 未显式传时，自动由 atProviders / slashProviders 合成默认的 @ 与 / 两条。
+  directives: {
+    type: Array,
+    default: null,
+  },
   atProviders: {
     type: Array,
     default: () => [],
@@ -42,13 +63,15 @@ const props = defineProps({
 
 const emit = defineEmits(['submit', 'stop', 'resource-select', 'command-select', 'token-hover', 'token-click', 'token-action', 'token-update'])
 
+const slots = useSlots()
+
 const editorRef = ref(null)
 const fileInputRef = ref(null)
 const folderInputRef = ref(null)
 const pickerRef = ref(null)
 const pickerOpen = ref(false)
 const pickerMode = ref(null)
-const pickerTrigger = ref('@')
+const pickerDirective = ref(null)
 const triggerRange = ref(null)
 const draftText = ref('')
 const pickerKeyword = ref('')
@@ -58,16 +81,30 @@ const attachments = ref([])
 const tokenTooltip = ref(null)
 const tokenPopup = ref(null)
 const slotDraftValue = ref('')
+// 当消费者提供了 #chip 作用域插槽时，用它渲染每个 token。
+// tokenRegistry 由 DOM 反推（见 syncTokenRegistry），Teleport 据此把插槽挂进占位。
+const tokenRegistry = ref([])
+let tokenSeq = 0
 let editorObserver = null
 const CLIPBOARD_BLOCKS_MIME = 'application/x-prompt-composer-blocks'
 
+const hasChipSlot = computed(() => Boolean(slots.chip))
+const hasPickerItemSlot = computed(() => Boolean(slots['picker-item']))
+
+const directives = computed(() => normalizeDirectives({
+  directives: props.directives,
+  atProviders: props.atProviders,
+  slashProviders: props.slashProviders,
+}))
+
 const canSubmit = computed(() => draftText.value.trim().length > 0 || attachments.value.length > 0)
-const pickerProviders = computed(() => pickerTrigger.value === '/' ? props.slashProviders : props.atProviders)
-const pickerEmptyLabel = computed(() => pickerTrigger.value === '/' ? '命令' : '添加')
-const pickerNoResultsLabel = computed(() => pickerTrigger.value === '/' ? 'No commands found' : 'No resources found')
+const pickerProviders = computed(() => pickerDirective.value?.providers || [])
+const pickerTrigger = computed(() => pickerDirective.value?.trigger || '@')
+const pickerEmptyLabel = computed(() => pickerDirective.value?.emptyLabel || '添加')
+const pickerNoResultsLabel = computed(() => pickerDirective.value?.noResultsLabel || 'No results found')
 
 function updateDraftText() {
-  draftText.value = editorRef.value?.innerText.replace(/\u00a0/g, ' ') || ''
+  draftText.value = editorRef.value?.innerText.replace(/ /g, ' ') || ''
 }
 
 function getResourceSnapshot(resource) {
@@ -80,175 +117,8 @@ function getResourceSnapshot(resource) {
     group: resource.group || '',
     action: resource.action || '',
     keywords: resource.keywords || [],
+    payload: resource.payload,
   }
-}
-
-function blocksToPlainText(blocks) {
-  return blocks
-    .map((block) => {
-      if (block.type === 'resource') {
-        return `${block.resource?.icon || '#'} ${block.resource?.title || ''}`
-      }
-
-      if (block.type === 'slot') {
-        if (block.slot?.kind === 'resource') {
-          return block.slot.value
-            ? `${block.slot.value.icon || '#'} ${block.slot.value.title || ''}`
-            : `[${block.slot.label || block.slot.id || '选择资源'}]`
-        }
-
-        return block.slot?.value || `[${block.slot?.label || '输入内容'}]`
-      }
-
-      return block.text || ''
-    })
-    .join('')
-    .replace(/\u00a0/g, ' ')
-    .trim()
-}
-
-function getDefaultResourceIcon(type) {
-  const iconsByType = {
-    browser: '🌐',
-    file: '📎',
-    folder: '📎',
-    goal: '🎯',
-    memory: '🧠',
-    plan: '☑️',
-    profile: '👤',
-    tool: '🛠',
-    workspace: '📦',
-  }
-
-  return iconsByType[type] || '#'
-}
-
-function escapeResourceLabel(label = '') {
-  return label.replace(/[\\\]]/g, '\\$&')
-}
-
-function unescapeResourceLabel(label = '') {
-  return label.replace(/\\(.)/g, '$1')
-}
-
-function resourceToClipboardUrl(resource = {}) {
-  const type = encodeURIComponent(resource.type || 'resource')
-  const id = encodeURIComponent(resource.id || resource.title || 'unknown')
-  return `resource://${type}/${id}`
-}
-
-function resourceFromClipboardUrl(url, title) {
-  try {
-    const parsedUrl = new URL(url)
-    const type = decodeURIComponent(parsedUrl.hostname || 'resource')
-    const id = decodeURIComponent(parsedUrl.pathname.replace(/^\//, '') || title)
-
-    return {
-      id,
-      type,
-      title,
-      icon: getDefaultResourceIcon(type),
-    }
-  } catch {
-    return {
-      id: title,
-      type: 'resource',
-      title,
-      icon: '#',
-    }
-  }
-}
-
-function createResourceSlotFromLabel(label = '') {
-  const [resourceType = 'resource', ...idParts] = label.split(':')
-
-  return {
-    id: label,
-    kind: 'resource',
-    resourceType,
-    label,
-    placeholder: `选择 ${resourceType}`,
-    value: null,
-    options: [],
-    target: idParts.join(':') || '',
-  }
-}
-
-function createInputSlotFromLabel(label = '') {
-  const [slotLabel, ...valueParts] = label.split('=')
-
-  return {
-    id: slotLabel,
-    kind: 'input',
-    label: slotLabel,
-    placeholder: slotLabel,
-    value: valueParts.join('='),
-  }
-}
-
-function blocksToClipboardText(blocks) {
-  return blocks
-    .map((block) => {
-      if (block.type === 'resource') {
-        const resource = block.resource || {}
-        return `[@${escapeResourceLabel(resource.title || resource.id || 'resource')}](${resourceToClipboardUrl(resource)})`
-      }
-
-      if (block.type === 'slot') {
-        const slot = block.slot || {}
-
-        if (slot.kind === 'resource') {
-          if (slot.value) {
-            return `[@${escapeResourceLabel(slot.value.title || slot.value.id || 'resource')}](${resourceToClipboardUrl(slot.value)})`
-          }
-
-          return `[@${escapeResourceLabel(slot.id || slot.label || 'resource')}]`
-        }
-
-        const label = slot.value ? `${slot.label || '输入内容'}=${slot.value}` : slot.label || '输入内容'
-        return `[:${escapeResourceLabel(label)}]`
-      }
-
-      return block.text || ''
-    })
-    .join('')
-}
-
-function parseClipboardTextToBlocks(text) {
-  const blocks = []
-  const resourcePattern = /\[([@:])((?:\\.|[^\]\\])*)\](?:\((resource:\/\/[^)\s]+)\))?/g
-  let lastIndex = 0
-  let match = resourcePattern.exec(text)
-
-  while (match) {
-    appendTextBlock(blocks, text.slice(lastIndex, match.index))
-    const sigil = match[1]
-    const label = unescapeResourceLabel(match[2])
-    const url = match[3]
-
-    if (sigil === '@' && url) {
-      blocks.push({
-        type: 'resource',
-        resource: resourceFromClipboardUrl(url, label),
-      })
-    } else if (sigil === '@') {
-      blocks.push({
-        type: 'slot',
-        slot: createResourceSlotFromLabel(label),
-      })
-    } else {
-      blocks.push({
-        type: 'slot',
-        slot: createInputSlotFromLabel(label),
-      })
-    }
-
-    lastIndex = resourcePattern.lastIndex
-    match = resourcePattern.exec(text)
-  }
-
-  appendTextBlock(blocks, text.slice(lastIndex))
-  return blocks.length ? blocks : [{ type: 'text', text }]
 }
 
 function keepEditorScrolledToBottom() {
@@ -265,227 +135,99 @@ function focusEditor() {
   editorRef.value?.focus()
 }
 
-function createChip(resource) {
-  return createTokenElement({
-    type: 'resource',
-    resource: getResourceSnapshot(resource),
-  })
-}
+// ---- Token 占位与回显 -------------------------------------------------------
 
 function getBlockTitle(block) {
-  if (block.type === 'resource') {
-    return block.resource?.title || block.resource?.id || 'Resource'
-  }
-
-  if (block.type === 'slot') {
-    if (block.slot?.kind === 'resource') {
-      return block.slot.value?.title || block.slot.placeholder || block.slot.label || '选择资源'
-    }
-
-    return block.slot?.value || block.slot?.placeholder || block.slot?.label || '输入内容'
-  }
-
-  return 'Token'
+  return defaultPresentation.getTitle(block)
 }
 
 function getBlockIcon(block) {
-  if (block.type === 'resource') {
-    return block.resource?.icon || '#'
-  }
-
-  if (block.type === 'slot') {
-    if (block.slot?.kind === 'resource') {
-      return block.slot.value?.icon || '@'
-    }
-
-    return block.slot?.icon || ':'
-  }
-
-  return '#'
+  return defaultPresentation.getIcon(block)
 }
 
 function getBlockDescription(block) {
-  if (block.type === 'resource') {
-    return block.resource?.description || block.resource?.type || ''
-  }
-
-  if (block.type === 'slot') {
-    if (block.slot?.kind === 'resource') {
-      return block.slot.value?.description || block.slot.resourceType || '待选择'
-    }
-
-    return block.slot?.description || (block.slot?.value ? '可编辑输入' : '待填写')
-  }
-
-  return ''
+  return defaultPresentation.getDescription(block)
 }
 
+/**
+ * 创建一个「原子占位」：contenteditable=false 的 span，携带完整 block 数据。
+ * - 无 #chip 插槽：直接把默认「icon title」写进 textContent（与旧行为一致，无闪烁）。
+ * - 有 #chip 插槽：留空占位，交由 Teleport 渲染插槽（tokenRegistry 反推）。
+ */
 function createTokenElement(block) {
   const snapshot = block.type === 'resource'
     ? { type: 'resource', resource: getResourceSnapshot(block.resource) }
     : block
   const chip = document.createElement('span')
-  chip.className = [
-    'composer-chip',
-    'composer-token',
-    `composer-token--${snapshot.type}`,
-    snapshot.type === 'slot' && !snapshot.slot?.value ? 'composer-token--empty' : '',
-  ].filter(Boolean).join(' ')
+  chip.className = defaultPresentation.getTokenClassList(snapshot).join(' ')
   chip.contentEditable = 'false'
   chip.dataset.block = JSON.stringify(snapshot)
+  chip.dataset.tokenId = `tok-${++tokenSeq}`
+
   if (snapshot.type === 'resource') {
     chip.dataset.resourceId = snapshot.resource.id
     chip.dataset.resourceType = snapshot.resource.type
     chip.dataset.resource = JSON.stringify(snapshot.resource)
   }
-  chip.textContent = `${getBlockIcon(snapshot)} ${getBlockTitle(snapshot)}`
+
+  if (!hasChipSlot.value) {
+    chip.textContent = `${getBlockIcon(snapshot)} ${getBlockTitle(snapshot)}`
+  }
+
   return chip
 }
 
 function refreshTokenElement(element, block) {
   element.dataset.block = JSON.stringify(block)
-  element.className = [
-    'composer-chip',
-    'composer-token',
-    `composer-token--${block.type}`,
-    block.type === 'slot' && !block.slot?.value ? 'composer-token--empty' : '',
-  ].filter(Boolean).join(' ')
-  element.textContent = `${getBlockIcon(block)} ${getBlockTitle(block)}`
+  element.className = defaultPresentation.getTokenClassList(block).join(' ')
+
+  if (!hasChipSlot.value) {
+    element.textContent = `${getBlockIcon(block)} ${getBlockTitle(block)}`
+  }
+
+  syncTokenRegistry()
 }
 
-function getBlockFromTokenElement(element) {
-  try {
-    if (element.dataset.block) {
-      return JSON.parse(element.dataset.block)
+function createChip(resource) {
+  return createTokenElement({ type: 'resource', resource: getResourceSnapshot(resource) })
+}
+
+/**
+ * 从 DOM 反推 token 注册表（供 #chip 插槽 Teleport 使用）。
+ * 幂等：token 集合与各自的 data-block 未变化时不产生新的对象身份，
+ * 避免 Teleport 挂载引发 MutationObserver -> sync 的循环。
+ */
+function syncTokenRegistry() {
+  if (!hasChipSlot.value || !editorRef.value) {
+    if (tokenRegistry.value.length) {
+      tokenRegistry.value = []
     }
-  } catch {
-    return null
-  }
-
-  return {
-    type: 'resource',
-    resource: getResourceFromChip(element),
-  }
-}
-
-function getResourceFromChip(chip) {
-  try {
-    return JSON.parse(chip.dataset.resource)
-  } catch {
-    return {
-      id: chip.dataset.resourceId,
-      type: chip.dataset.resourceType,
-      title: chip.textContent.replace(/^#\s*/, ''),
-      icon: '#',
-    }
-  }
-}
-
-function appendTextBlock(blocks, text) {
-  if (!text) {
     return
   }
 
-  const normalizedText = text.replace(/\u00a0/g, ' ')
-  const previousBlock = blocks[blocks.length - 1]
+  const elements = editorRef.value.querySelectorAll('.composer-token')
+  const previousById = new Map(tokenRegistry.value.map((entry) => [entry.id, entry]))
+  const nextRegistry = []
+  let changed = elements.length !== tokenRegistry.value.length
 
-  if (previousBlock?.type === 'text') {
-    previousBlock.text += normalizedText
-    return
-  }
+  elements.forEach((element) => {
+    const id = element.dataset.tokenId || `tok-${++tokenSeq}`
+    element.dataset.tokenId = id
+    const block = getBlockFromTokenElement(element)
+    const previous = previousById.get(id)
 
-  blocks.push({
-    type: 'text',
-    text: normalizedText,
+    if (previous && previous.el === element && previous.raw === element.dataset.block) {
+      nextRegistry.push(previous)
+      return
+    }
+
+    changed = true
+    nextRegistry.push({ id, el: element, block, raw: element.dataset.block })
   })
-}
 
-function trimEditorBlocks(blocks) {
-  const nextBlocks = blocks.map((block) => ({ ...block }))
-
-  while (nextBlocks[0]?.type === 'text') {
-    nextBlocks[0].text = nextBlocks[0].text.replace(/^\s+/, '')
-
-    if (nextBlocks[0].text) {
-      break
-    }
-
-    nextBlocks.shift()
+  if (changed) {
+    tokenRegistry.value = nextRegistry
   }
-
-  while (nextBlocks[nextBlocks.length - 1]?.type === 'text') {
-    const lastBlock = nextBlocks[nextBlocks.length - 1]
-    lastBlock.text = lastBlock.text.replace(/\s+$/, '')
-
-    if (lastBlock.text) {
-      break
-    }
-
-    nextBlocks.pop()
-  }
-
-  return nextBlocks
-}
-
-function serializeNodesToBlocks(nodes, { trim = false } = {}) {
-  const blocks = []
-
-  function visit(node) {
-    if (node.nodeType === Node.TEXT_NODE) {
-      appendTextBlock(blocks, node.textContent || '')
-      return
-    }
-
-    if (node.nodeName === 'BR') {
-      appendTextBlock(blocks, '\n')
-      return
-    }
-
-    if (node.nodeType !== Node.ELEMENT_NODE) {
-      return
-    }
-
-    if (node.classList.contains('composer-token') || node.classList.contains('composer-chip')) {
-      const tokenBlock = getBlockFromTokenElement(node)
-      if (tokenBlock) {
-        blocks.push(tokenBlock)
-        return
-      }
-
-      blocks.push({
-        type: 'resource',
-        resource: getResourceFromChip(node),
-      })
-      return
-    }
-
-    node.childNodes.forEach(visit)
-  }
-
-  nodes.forEach(visit)
-  return trim ? trimEditorBlocks(blocks) : blocks
-}
-
-function serializeEditorBlocks() {
-  return serializeNodesToBlocks(editorRef.value?.childNodes || [], { trim: true })
-}
-
-function serializeSelectionBlocks() {
-  const editor = editorRef.value
-  const selection = window.getSelection()
-
-  if (!editor || !selection || !selection.rangeCount || selection.isCollapsed) {
-    return []
-  }
-
-  const range = selection.getRangeAt(0)
-
-  if (!editor.contains(range.commonAncestorContainer)) {
-    return []
-  }
-
-  const fragment = range.cloneContents()
-  return serializeNodesToBlocks(fragment.childNodes)
 }
 
 function appendTextToEditor(text) {
@@ -521,6 +263,29 @@ function appendBlockToContainer(container, block) {
   })
 }
 
+// ---- 序列化 -----------------------------------------------------------------
+
+function serializeEditorBlocks() {
+  return serializeNodesToBlocks(editorRef.value?.childNodes || [], { trim: true })
+}
+
+function serializeSelectionBlocks() {
+  const editor = editorRef.value
+  const selection = window.getSelection()
+
+  if (!editor || !selection || !selection.rangeCount || selection.isCollapsed) {
+    return []
+  }
+
+  const range = selection.getRangeAt(0)
+
+  if (!editor.contains(range.commonAncestorContainer)) {
+    return []
+  }
+
+  return serializeNodesToBlocks(range.cloneContents().childNodes)
+}
+
 function insertBlocksAtSelection(blocks) {
   const selection = window.getSelection()
 
@@ -544,6 +309,7 @@ function insertBlocksAtSelection(blocks) {
   selection.addRange(nextRange)
 
   updateDraftText()
+  syncTokenRegistry()
   updatePickerKeyword()
   keepEditorScrolledToBottom()
 }
@@ -560,6 +326,8 @@ function placeCaretAtEditorEnd() {
   selection?.removeAllRanges()
   selection?.addRange(range)
 }
+
+// ---- 附件 -------------------------------------------------------------------
 
 function getFileExtension(name = '') {
   const lastDot = name.lastIndexOf('.')
@@ -640,10 +408,12 @@ function insertNodeAtSelection(node) {
   selection.addRange(range)
 }
 
+// ---- 指令 / Picker ----------------------------------------------------------
+
 function closePicker() {
   pickerOpen.value = false
   pickerMode.value = null
-  pickerTrigger.value = '@'
+  pickerDirective.value = null
   triggerRange.value = null
   pickerKeyword.value = ''
 }
@@ -651,10 +421,10 @@ function closePicker() {
 function openToolbarPicker() {
   focusEditor()
   pickerMode.value = 'toolbar'
-  pickerTrigger.value = '@'
+  pickerDirective.value = findDirective(directives.value, '@') || directives.value[0] || null
   triggerRange.value = null
   pickerKeyword.value = ''
-  pickerOpen.value = true
+  pickerOpen.value = Boolean(pickerDirective.value)
 }
 
 function removeTriggerToken() {
@@ -680,109 +450,39 @@ function removeTriggerToken() {
   updateDraftText()
 }
 
-function getTextPositionAtOffset(root, targetOffset) {
-  let currentOffset = 0
-  let fallback = null
-
-  function walk(node) {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const textLength = node.textContent?.length || 0
-      fallback = { node, offset: textLength }
-
-      if (currentOffset + textLength >= targetOffset) {
-        return {
-          node,
-          offset: Math.max(0, targetOffset - currentOffset),
-        }
-      }
-
-      currentOffset += textLength
-      return null
-    }
-
-    if (node.nodeName === 'BR') {
-      if (currentOffset === targetOffset) {
-        return fallback
-      }
-
-      currentOffset += 1
-      return null
-    }
-
-    for (const child of node.childNodes) {
-      const position = walk(child)
-
-      if (position) {
-        return position
-      }
-    }
-
-    return null
-  }
-
-  return walk(root)
-}
-
-function getTriggerTokenFromCaret() {
-  const editor = editorRef.value
-  const selection = window.getSelection()
-
-  if (!editor || !selection || !selection.rangeCount) {
-    return null
-  }
-
-  const currentRange = selection.getRangeAt(0)
-
-  if (!editor.contains(currentRange.endContainer)) {
-    return null
-  }
-
-  const beforeRange = document.createRange()
-  beforeRange.setStart(editor, 0)
-  beforeRange.setEnd(currentRange.endContainer, currentRange.endOffset)
-
-  const beforeCaret = beforeRange.toString()
-  const tokenMatch = beforeCaret.match(/(?:^|[\s\u00a0])([@/][^\s\u00a0]*)$/)
-
-  if (!tokenMatch) {
-    return null
-  }
-
-  const tokenStart = beforeCaret.length - tokenMatch[1].length
-  const tokenPosition = getTextPositionAtOffset(editor, tokenStart)
-
-  if (!tokenPosition) {
-    return null
-  }
-
-  const tokenNodeLength = tokenPosition.node.textContent?.length || 0
-
-  if (tokenPosition.offset >= tokenNodeLength) {
-    return null
-  }
-
-  const nextRange = document.createRange()
-  nextRange.setStart(tokenPosition.node, tokenPosition.offset)
-  nextRange.setEnd(tokenPosition.node, tokenPosition.offset + 1)
-  return {
-    trigger: tokenMatch[1][0],
-    keyword: tokenMatch[1].slice(1),
-    range: nextRange,
-  }
-}
-
 function openPicker() {
-  const triggerToken = getTriggerTokenFromCaret()
+  const detected = detectTriggerAtCaret(editorRef.value, directives.value)
 
-  if (!triggerToken) {
+  if (!detected) {
     return
   }
 
   pickerMode.value = 'trigger'
-  pickerTrigger.value = triggerToken.trigger
-  triggerRange.value = triggerToken.range
-  pickerKeyword.value = triggerToken.keyword
+  pickerDirective.value = detected.directive
+  triggerRange.value = detected.range
+  pickerKeyword.value = detected.keyword
   pickerOpen.value = true
+}
+
+function updatePickerKeyword() {
+  const detected = detectTriggerAtCaret(editorRef.value, directives.value)
+
+  if (detected) {
+    pickerMode.value = 'trigger'
+    pickerDirective.value = detected.directive
+    triggerRange.value = detected.range
+    pickerKeyword.value = detected.keyword
+    pickerOpen.value = true
+    return
+  }
+
+  if (!pickerOpen.value) {
+    return
+  }
+
+  if (pickerMode.value === 'trigger') {
+    closePicker()
+  }
 }
 
 function replaceTriggerWithResource(resource) {
@@ -801,9 +501,10 @@ function replaceTriggerWithResource(resource) {
 
   if (!triggerRange.value) {
     insertNodeAtSelection(createChip(resource))
-    insertNodeAtSelection(document.createTextNode('\u00a0'))
+    insertNodeAtSelection(document.createTextNode(' '))
     closePicker()
     updateDraftText()
+    syncTokenRegistry()
     keepEditorScrolledToBottom()
     emit('resource-select', resource)
     return
@@ -819,7 +520,7 @@ function replaceTriggerWithResource(resource) {
 
   replaceRange.deleteContents()
   const chip = createChip(resource)
-  const trailingSpace = document.createTextNode('\u00a0')
+  const trailingSpace = document.createTextNode(' ')
   const typingAnchor = document.createTextNode('')
   replaceRange.insertNode(typingAnchor)
   replaceRange.insertNode(trailingSpace)
@@ -833,6 +534,7 @@ function replaceTriggerWithResource(resource) {
 
   closePicker()
   updateDraftText()
+  syncTokenRegistry()
   keepEditorScrolledToBottom()
   emit('resource-select', resource)
 }
@@ -845,9 +547,9 @@ function runCommand(command) {
   closePicker()
 
   if (command.template) {
-    setTemplate(command.template)
+    applyTemplate(command.template)
   } else if (command.insertText) {
-    insertBlocksAtSelection(parseClipboardTextToBlocks(command.insertText))
+    insertBlocksAtSelection(parseTemplateToBlocks(command.insertText))
   }
 
   emit('command-select', command)
@@ -856,18 +558,34 @@ function runCommand(command) {
 }
 
 function handlePickerSelect(item) {
-  if (pickerTrigger.value === '/') {
+  const directive = pickerDirective.value
+  const context = {
+    directive,
+    trigger: directive?.trigger,
+    keyword: pickerKeyword.value,
+    surface: 'editor',
+  }
+
+  // 自定义选中行为：返回 false 表示阻止默认行为（仍清理触发符与关闭菜单）。
+  if (directive?.onSelect) {
+    const result = directive.onSelect(item, context)
+
+    if (result === false) {
+      if (triggerRange.value) {
+        removeTriggerToken()
+      }
+      closePicker()
+      updateDraftText()
+      return
+    }
+  }
+
+  if (directive?.mode === 'command') {
     runCommand(item)
     return
   }
 
   replaceTriggerWithResource(item)
-}
-
-function insertPlainText(text) {
-  insertNodeAtSelection(document.createTextNode(text))
-  updateDraftText()
-  keepEditorScrolledToBottom()
 }
 
 function insertLineBreak() {
@@ -886,41 +604,17 @@ function submit() {
   const blocks = serializeEditorBlocks()
 
   emit('submit', {
-    text: blocksToPlainText(blocks),
+    text: blocksToPlainText(blocks, defaultPresentation),
     blocks,
-    resources: blocks
-      .filter((block) => block.type === 'resource')
-      .map((block) => block.resource),
-    slots: blocks
-      .filter((block) => block.type === 'slot')
-      .map((block) => block.slot),
+    resources: collectResources(blocks),
+    slots: collectSlots(blocks),
     attachments: attachments.value,
   })
   editorRef.value.innerHTML = ''
   attachments.value = []
   closePicker()
   updateDraftText()
-}
-
-function updatePickerKeyword() {
-  const triggerToken = getTriggerTokenFromCaret()
-
-  if (triggerToken) {
-    pickerMode.value = 'trigger'
-    pickerTrigger.value = triggerToken.trigger
-    triggerRange.value = triggerToken.range
-    pickerKeyword.value = triggerToken.keyword
-    pickerOpen.value = true
-    return
-  }
-
-  if (!pickerOpen.value) {
-    return
-  }
-
-  if (pickerMode.value === 'trigger') {
-    closePicker()
-  }
+  syncTokenRegistry()
 }
 
 function onEditorInput() {
@@ -935,8 +629,23 @@ function onEditorInput() {
   keepEditorScrolledToBottom()
 }
 
+// ---- Token 交互（tooltip / popup / action） ---------------------------------
+
 function findTokenElement(target) {
   return target?.closest?.('.composer-token')
+}
+
+// tooltip / popup 统一锚定到 token 元素本身，并向上生长（编辑框固定在视口底部）。
+// 用 CSS `bottom` 定位：元素底边贴在 token 上方 gap 处，内容向上展开，不会被视口底部裁掉。
+const TOOLTIP_MIN_WIDTH = 220
+const POPUP_MIN_WIDTH = 260
+
+function anchorAboveToken(element, minWidth) {
+  const rect = element.getBoundingClientRect()
+  const gap = 10
+  const left = Math.max(12, Math.min(rect.left, window.innerWidth - minWidth - 12))
+  const bottom = window.innerHeight - rect.top + gap
+  return { left, bottom }
 }
 
 function getTokenActions(block) {
@@ -957,14 +666,14 @@ function openTokenPopup(event, tokenElement) {
     return
   }
 
+  // popup 与 tooltip 互斥：打开 popup 时清掉 tooltip。
   tokenTooltip.value = null
   slotDraftValue.value = block.type === 'slot' ? block.slot?.value || '' : ''
   tokenPopup.value = {
     block,
     element: tokenElement,
     actions: getTokenActions(block),
-    x: event.clientX,
-    y: event.clientY,
+    ...anchorAboveToken(tokenElement, POPUP_MIN_WIDTH),
   }
   emit('token-click', { block, surface: 'editor' })
 }
@@ -1033,6 +742,7 @@ function runTokenAction(action) {
     tokenPopup.value.element.remove()
     closeTokenPopup()
     updateDraftText()
+    syncTokenRegistry()
     emit('token-action', payload)
     return
   }
@@ -1055,9 +765,23 @@ function onEditorClick(event) {
 }
 
 function onEditorMouseover(event) {
+  // popup 开着时不显示 tooltip（互斥）。
+  if (tokenPopup.value) {
+    return
+  }
+
   const tokenElement = findTokenElement(event.target)
 
+  // 只在悬停到 token 上时显示；离开 token（哪怕仍在输入框内）立即清除。
   if (!tokenElement) {
+    if (tokenTooltip.value) {
+      tokenTooltip.value = null
+    }
+    return
+  }
+
+  // 已经在同一个 token 上，避免重复计算与闪烁。
+  if (tokenTooltip.value?.element === tokenElement) {
     return
   }
 
@@ -1069,24 +793,12 @@ function onEditorMouseover(event) {
 
   tokenTooltip.value = {
     block,
+    element: tokenElement,
     title: getBlockTitle(block),
     description: getBlockDescription(block),
-    x: event.clientX,
-    y: event.clientY,
+    ...anchorAboveToken(tokenElement, TOOLTIP_MIN_WIDTH),
   }
   emit('token-hover', { block, surface: 'editor' })
-}
-
-function onEditorMousemove(event) {
-  if (!tokenTooltip.value) {
-    return
-  }
-
-  tokenTooltip.value = {
-    ...tokenTooltip.value,
-    x: event.clientX,
-    y: event.clientY,
-  }
 }
 
 function onEditorMouseleave() {
@@ -1135,12 +847,12 @@ function onPaste(event) {
       insertBlocksAtSelection(JSON.parse(serializedBlocks))
       return
     } catch {
-      insertBlocksAtSelection(parseClipboardTextToBlocks(text))
+      insertBlocksAtSelection(parseTemplateToBlocks(text))
       return
     }
   }
 
-  insertBlocksAtSelection(parseClipboardTextToBlocks(text))
+  insertBlocksAtSelection(parseTemplateToBlocks(text))
 }
 
 function writeBlocksToClipboard(event, blocks) {
@@ -1166,6 +878,7 @@ function onCut(event) {
   window.getSelection()?.deleteFromDocument()
   closePicker()
   updateDraftText()
+  syncTokenRegistry()
   keepEditorScrolledToBottom()
 }
 
@@ -1220,18 +933,7 @@ function onToolbarResourceClick() {
   openToolbarPicker()
 }
 
-function applyTemplateSlotConfig(blocks, slotConfig = {}) {
-  return blocks.map((block) => {
-    if (block.type !== 'slot') {
-      return block
-    }
-
-    const config = slotConfig[block.slot.id] || slotConfig[block.slot.label]
-    return config
-      ? { ...block, slot: { ...block.slot, ...config } }
-      : block
-  })
-}
+// ---- 生命周期 & 对外 API ----------------------------------------------------
 
 onMounted(() => {
   updateDraftText()
@@ -1239,6 +941,7 @@ onMounted(() => {
   if (editorRef.value) {
     editorObserver = new MutationObserver(() => {
       updateDraftText()
+      syncTokenRegistry()
       if (!isComposing.value) {
         updatePickerKeyword()
         keepEditorScrolledToBottom()
@@ -1273,7 +976,7 @@ function setContent(payload = {}) {
       editorRef.value.append(createTokenElement(block))
 
       if (!blocks[index + 1]) {
-        editorRef.value.append(document.createTextNode('\u00a0'))
+        editorRef.value.append(document.createTextNode(' '))
       }
 
       return
@@ -1288,110 +991,143 @@ function setContent(payload = {}) {
   }))
 
   updateDraftText()
+  syncTokenRegistry()
   focusEditor()
   placeCaretAtEditorEnd()
   keepEditorScrolledToBottom()
 }
 
+function applyTemplate(template) {
+  setContent({
+    blocks: resolveTemplateBlocks(template),
+    attachments: template.attachments || [],
+  })
+}
+
 defineExpose({
   insertBlocks: insertBlocksAtSelection,
   parseTemplate(content, slotConfig = {}) {
-    return applyTemplateSlotConfig(parseClipboardTextToBlocks(content), slotConfig)
+    return applyTemplateSlotConfig(parseTemplateToBlocks(content), slotConfig)
   },
   setContent,
-  setTemplate(template) {
-    const templateBlocks = template.blocks
-      || applyTemplateSlotConfig(parseClipboardTextToBlocks(template.content || template), template.slots)
-
-    setContent({
-      blocks: templateBlocks,
-      attachments: template.attachments || [],
-    })
-  },
+  setTemplate: applyTemplate,
+  focus: focusEditor,
+  openPicker,
 })
 </script>
 
 <template>
   <section
-    class="prompt-composer"
-    :class="{ 'prompt-composer--dragging': isDraggingFile }"
+    class="prompt-composer relative grid grid-rows-[minmax(56px,auto)_64px] w-[min(100%,1474px)] min-h-[124px] mx-auto text-[#202124] bg-white border border-[#dedede] rounded-[30px] shadow-[0_1px_0_rgba(0,0,0,0.02)] focus-within:border-[#d6d6d6] max-[720px]:min-h-[120px] max-[720px]:rounded-[22px] max-[720px]:grid-rows-[minmax(54px,auto)_58px]"
+    :class="isDraggingFile ? 'prompt-composer--dragging !border-[#bfc3c8] !bg-[#fbfbfb]' : ''"
     @click="focusEditor"
     @dragenter.prevent="onDragEnter"
     @dragover="onDragOver"
     @dragleave="onDragLeave"
     @drop="onDrop"
   >
+    <div
+      v-if="isDraggingFile"
+      class="prompt-composer__drop-hint absolute inset-2.5 grid place-items-center text-[#6b6f76] text-[1.35rem] font-[650] bg-[rgba(247,247,247,0.82)] border-2 border-dashed border-[#d6d8db] rounded-3xl pointer-events-none"
+    >
+      拖放文件到这里
+    </div>
     <input
       ref="fileInputRef"
-      class="prompt-composer__file-input"
+      class="prompt-composer__file-input absolute w-px h-px overflow-hidden opacity-0 pointer-events-none"
       type="file"
       multiple
       @change="onFileInputChange"
     >
     <input
       ref="folderInputRef"
-      class="prompt-composer__file-input"
+      class="prompt-composer__file-input absolute w-px h-px overflow-hidden opacity-0 pointer-events-none"
       type="file"
       multiple
       webkitdirectory
       directory
       @change="onFileInputChange"
     >
-    <div v-if="pickerOpen" class="prompt-composer__picker" @click.stop>
+    <div
+      v-if="pickerOpen"
+      class="prompt-composer__picker absolute right-0 bottom-[calc(100%+15px)] left-0 z-30"
+      @click.stop
+    >
       <ResourcePicker
         :key="pickerTrigger"
         ref="pickerRef"
         :providers="pickerProviders"
         :keyword="pickerKeyword"
         :trigger="pickerTrigger"
+        :directive="pickerDirective"
         :empty-label="pickerEmptyLabel"
         :no-results-label="pickerNoResultsLabel"
         @select="handlePickerSelect"
         @close="closePicker"
-      />
+      >
+        <template v-if="hasPickerItemSlot" #item="itemProps">
+          <slot name="picker-item" v-bind="itemProps" />
+        </template>
+      </ResourcePicker>
     </div>
+
+    <!-- #chip 作用域插槽：把每个 token 占位渲染成消费者自定义的 Vue 组件 -->
+    <template v-if="hasChipSlot">
+      <Teleport
+        v-for="token in tokenRegistry"
+        :key="token.id"
+        :to="token.el"
+      >
+        <slot name="chip" :block="token.block" :surface="'editor'" />
+      </Teleport>
+    </template>
+
     <div
       v-if="tokenTooltip"
-      class="composer-token-tooltip"
-      :style="{ left: `${tokenTooltip.x + 12}px`, top: `${tokenTooltip.y + 14}px` }"
+      class="composer-token-tooltip fixed z-[100] max-w-[min(360px,calc(100vw-28px))] grid gap-[3px] px-[11px] py-[9px] text-[#202124] text-[0.88rem] bg-white/98 border border-[#e2e2e2] rounded-xl shadow-[0_18px_60px_rgba(0,0,0,0.08)] backdrop-blur-[18px] pointer-events-none"
+      :style="{ left: `${tokenTooltip.left}px`, bottom: `${tokenTooltip.bottom}px` }"
     >
       <strong>{{ tokenTooltip.title }}</strong>
-      <span>{{ tokenTooltip.description }}</span>
+      <span class="text-[#8c8f94]">{{ tokenTooltip.description }}</span>
     </div>
     <div
       v-if="tokenPopup"
-      class="composer-token-popup"
-      :style="{ left: `${tokenPopup.x}px`, top: `${tokenPopup.y + 12}px` }"
+      class="composer-token-popup fixed z-[100] grid min-w-[260px] max-w-[min(360px,calc(100vw-28px))] gap-1 p-2 text-[#202124] bg-white/98 border border-[#e2e2e2] rounded-2xl shadow-[0_18px_60px_rgba(0,0,0,0.08)] backdrop-blur-[18px]"
+      :style="{ left: `${tokenPopup.left}px`, bottom: `${tokenPopup.bottom}px` }"
       @click.stop
     >
-      <div class="composer-token-popup__header">
-        <strong>{{ getBlockTitle(tokenPopup.block) }}</strong>
-        <span>{{ getBlockDescription(tokenPopup.block) }}</span>
+      <div class="composer-token-popup__header grid gap-0.5 px-[9px] pt-2 pb-2.5">
+        <strong class="text-[0.95rem]">{{ getBlockTitle(tokenPopup.block) }}</strong>
+        <span class="text-[#8c8f94] text-[0.84rem]">{{ getBlockDescription(tokenPopup.block) }}</span>
       </div>
       <div
         v-if="tokenPopup.block.type === 'slot' && tokenPopup.block.slot?.kind === 'input'"
-        class="composer-token-popup__editor"
+        class="composer-token-popup__editor flex gap-2 px-1 pt-1 pb-2"
       >
         <input
           v-model="slotDraftValue"
-          class="composer-token-popup__input"
+          class="composer-token-popup__input min-w-0 flex-1 h-9 px-2.5 text-[#202124] font-[inherit] border border-[#dedede] rounded-[10px] outline-none focus:border-[#bfc3c8]"
           type="text"
           :placeholder="tokenPopup.block.slot.placeholder"
           @keydown.enter.prevent="applySlotDraft"
         >
-        <button type="button" class="composer-token-popup__apply" @click="applySlotDraft">
+        <button
+          type="button"
+          class="composer-token-popup__apply h-9 px-3 text-white bg-[#17181a] border-0 rounded-[10px] cursor-pointer"
+          @click="applySlotDraft"
+        >
           应用
         </button>
       </div>
       <div
         v-if="tokenPopup.block.type === 'slot' && tokenPopup.block.slot?.kind === 'resource' && tokenPopup.block.slot.options?.length"
-        class="composer-token-popup__options"
+        class="composer-token-popup__options grid gap-1"
       >
         <button
           v-for="option in tokenPopup.block.slot.options"
           :key="`${option.type}:${option.id}`"
           type="button"
-          class="composer-token-popup__item"
+          class="composer-token-popup__item grid grid-cols-[24px_minmax(0,1fr)] items-center gap-1.5 h-9 px-2.5 text-left bg-transparent border-0 rounded-[10px] cursor-pointer hover:bg-[#f1f2f3]"
           @click="chooseSlotOption(option)"
         >
           <span>{{ option.icon || '@' }}</span>
@@ -1402,7 +1138,7 @@ defineExpose({
         v-for="action in tokenPopup.actions"
         :key="action.id"
         type="button"
-        class="composer-token-popup__item"
+        class="composer-token-popup__item grid grid-cols-[24px_minmax(0,1fr)] items-center gap-1.5 h-9 px-2.5 text-left bg-transparent border-0 rounded-[10px] cursor-pointer hover:bg-[#f1f2f3]"
         @click="runTokenAction(action)"
       >
         <span>{{ action.icon }}</span>
@@ -1410,22 +1146,26 @@ defineExpose({
       </button>
     </div>
 
-    <div class="prompt-composer__body">
-      <div v-if="attachments.length" class="prompt-composer__attachments" @click.stop>
+    <div class="prompt-composer__body min-h-[56px] px-[26px] pt-[26px] pb-1 max-[720px]:px-4 max-[720px]:pt-5 max-[720px]:pb-0">
+      <div
+        v-if="attachments.length"
+        class="prompt-composer__attachments flex flex-wrap gap-2.5 mt-[-8px] mb-3.5 ml-[-8px] max-[720px]:mt-[-4px] max-[720px]:mb-2.5 max-[720px]:ml-[-6px]"
+        @click.stop
+      >
         <article
           v-for="attachment in attachments"
           :key="attachment.id"
-          class="composer-attachment"
+          class="composer-attachment relative grid w-[330px] max-w-[min(330px,100%)] min-h-[94px] grid-cols-[80px_minmax(0,1fr)] items-center pl-2.5 pr-[46px] py-2 bg-white border border-[#e5e5e5] rounded-[22px] max-[720px]:w-40 max-[720px]:min-h-[156px] max-[720px]:grid-cols-[1fr] max-[720px]:items-start max-[720px]:px-2.5 max-[720px]:pt-2.5 max-[720px]:pb-3"
         >
-          <span class="composer-attachment__icon">
+          <span class="composer-attachment__icon grid w-20 h-20 place-items-center text-[#6c7077] bg-[#f5f5f5] rounded-[18px] max-[720px]:w-full max-[720px]:h-[84px]">
             <component :is="attachment.icon" :size="38" :stroke-width="2.2" />
           </span>
-          <span class="composer-attachment__meta">
-            <span class="composer-attachment__name">{{ attachment.name }}</span>
-            <span class="composer-attachment__type">{{ attachment.kind }}</span>
+          <span class="composer-attachment__meta grid min-w-0 gap-1 pl-3 max-[720px]:pl-0 max-[720px]:pt-2">
+            <span class="composer-attachment__name overflow-hidden whitespace-nowrap text-ellipsis text-[#202124] text-[1.62rem] font-bold leading-[1.15] max-[720px]:text-base">{{ attachment.name }}</span>
+            <span class="composer-attachment__type overflow-hidden whitespace-nowrap text-ellipsis text-[#74777e] text-[1.42rem] font-medium leading-[1.15] max-[720px]:text-[0.9rem]">{{ attachment.kind }}</span>
           </span>
           <button
-            class="composer-attachment__remove"
+            class="composer-attachment__remove absolute top-[-8px] right-[7px] inline-flex w-[34px] h-[34px] items-center justify-center text-white bg-[#161719] border-0 rounded-full cursor-pointer"
             type="button"
             title="移除"
             @click="removeAttachment(attachment.id)"
@@ -1436,7 +1176,7 @@ defineExpose({
       </div>
       <div
         ref="editorRef"
-        class="prompt-composer__editor"
+        class="prompt-composer__editor min-h-8 max-h-[calc(1.34em*8)] overflow-y-auto overscroll-contain text-[#202124] text-[1.58rem] font-[650] leading-[1.34] outline-none whitespace-pre-wrap break-words [scrollbar-width:thin] [scrollbar-color:#d0d2d4_transparent] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-thumb]:bg-[#d0d2d4] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent empty:before:content-[attr(data-placeholder)] empty:before:text-[#9a9da2] empty:before:pointer-events-none max-[720px]:text-base max-[720px]:font-medium"
         contenteditable="true"
         role="textbox"
         aria-multiline="true"
@@ -1444,7 +1184,6 @@ defineExpose({
         @input="onEditorInput"
         @click="onEditorClick"
         @mouseover="onEditorMouseover"
-        @mousemove="onEditorMousemove"
         @mouseleave="onEditorMouseleave"
         @keydown="onEditorKeydown"
         @keyup="onEditorInput"
@@ -1456,46 +1195,63 @@ defineExpose({
       />
     </div>
 
-    <div class="prompt-composer__toolbar" @click.stop>
-      <div class="prompt-composer__tools">
-        <button class="composer-add-button" type="button" title="添加资源" @click="onToolbarResourceClick">
-          <Plus :size="28" />
-        </button>
-        <button class="composer-access-button" type="button" @click="focusEditor">
-          <ShieldCheck :size="20" />
-          <span>完全访问</span>
-          <ChevronDown :size="18" />
-        </button>
-      </div>
+    <div class="prompt-composer__toolbar flex min-h-[64px] items-center justify-between gap-3 px-4 pt-2 pb-3.5 max-[720px]:min-h-[58px] max-[720px]:px-2.5 max-[720px]:pt-1.5 max-[720px]:pb-2.5" @click.stop>
+      <slot name="toolbar-start">
+        <div class="prompt-composer__tools flex min-w-0 items-center gap-3.5 max-[720px]:gap-[7px]">
+          <button
+            class="composer-add-button inline-flex items-center justify-center border-0 cursor-pointer w-14 h-14 flex-[0_0_56px] text-[#151618] bg-[#f3f3f3] rounded-full max-[720px]:w-[42px] max-[720px]:h-[42px] max-[720px]:basis-[42px]"
+            type="button"
+            title="添加资源"
+            @click="onToolbarResourceClick"
+          >
+            <Plus :size="28" />
+          </button>
+          <button
+            class="composer-access-button inline-flex items-center justify-center border-0 cursor-pointer gap-2 min-w-0 h-[42px] px-0.5 text-[#f05a1a] text-[1.35rem] font-bold bg-transparent [&>span]:overflow-hidden [&>span]:whitespace-nowrap [&>span]:text-ellipsis max-[720px]:max-w-[132px] max-[720px]:gap-[5px] max-[720px]:text-[0.96rem]"
+            type="button"
+            @click="focusEditor"
+          >
+            <ShieldCheck :size="20" />
+            <span>完全访问</span>
+            <ChevronDown :size="18" />
+          </button>
+        </div>
+      </slot>
 
-      <div class="prompt-composer__tools">
-        <Circle class="composer-status-dot" :size="19" />
-        <button class="composer-model-button" type="button" @click="focusEditor">
-          <span>5.5</span>
-          <span>高</span>
-          <ChevronDown :size="18" />
-        </button>
-        <button
-          v-if="running"
-          class="composer-send-button composer-send-button--stop"
-          type="button"
-          title="Stop"
-          @click="emit('stop')"
-        >
-          <Square :size="16" fill="currentColor" />
-        </button>
-        <button
-          v-else
-          class="composer-send-button"
-          :class="{ 'composer-send-button--active': canSubmit }"
-          type="button"
-          title="Send"
-          :disabled="!canSubmit"
-          @click="submit"
-        >
-          <ArrowUp :size="25" />
-        </button>
-      </div>
+      <slot name="toolbar-end">
+        <div class="prompt-composer__tools flex min-w-0 items-center gap-3.5 max-[720px]:gap-[7px]">
+          <Circle class="composer-status-dot flex-none text-[#e2e2e2] [stroke-width:3]" :size="19" />
+          <button
+            class="composer-model-button inline-flex items-center justify-center border-0 cursor-pointer gap-[9px] h-[42px] text-[#202124] text-[1.55rem] font-[650] bg-transparent [&>span]:overflow-hidden [&>span]:whitespace-nowrap [&>span]:text-ellipsis [&>span+span]:text-[#8b8d92] max-[720px]:gap-1 max-[720px]:text-base"
+            type="button"
+            @click="focusEditor"
+          >
+            <span>5.5</span>
+            <span>高</span>
+            <ChevronDown :size="18" />
+          </button>
+          <button
+            v-if="running"
+            class="composer-send-button composer-send-button--stop inline-flex items-center justify-center border-0 cursor-pointer w-14 h-14 flex-[0_0_56px] text-white bg-[#e5484d] rounded-full max-[720px]:w-[42px] max-[720px]:h-[42px] max-[720px]:basis-[42px]"
+            type="button"
+            title="Stop"
+            @click="emit('stop')"
+          >
+            <Square :size="16" fill="currentColor" />
+          </button>
+          <button
+            v-else
+            class="composer-send-button inline-flex items-center justify-center border-0 cursor-pointer w-14 h-14 flex-[0_0_56px] text-white bg-[#111214] rounded-full disabled:text-[#bfc1c4] disabled:bg-[#f0f0f0] disabled:cursor-default disabled:opacity-100 max-[720px]:w-[42px] max-[720px]:h-[42px] max-[720px]:basis-[42px]"
+            :class="{ 'composer-send-button--active': canSubmit }"
+            type="button"
+            title="Send"
+            :disabled="!canSubmit"
+            @click="submit"
+          >
+            <ArrowUp :size="25" />
+          </button>
+        </div>
+      </slot>
     </div>
   </section>
 </template>

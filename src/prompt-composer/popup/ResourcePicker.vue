@@ -15,6 +15,10 @@ const props = defineProps({
     type: String,
     default: '@',
   },
+  directive: {
+    type: Object,
+    default: () => ({}),
+  },
   emptyLabel: {
     type: String,
     default: '添加',
@@ -158,8 +162,8 @@ defineExpose({
 </script>
 
 <template>
-  <div class="resource-picker">
-    <div class="resource-picker__header">
+  <div class="resource-picker w-full max-h-[min(638px,calc(100vh-184px))] overflow-hidden text-[#202124] bg-white/95 border border-[#e4e4e4] rounded-[30px] shadow-[0_18px_60px_rgba(0,0,0,0.08)] backdrop-blur-[18px] max-[720px]:rounded-[22px]">
+    <div class="resource-picker__header hidden">
       <span class="resource-picker__trigger">{{ trigger }}</span>
       <span class="resource-picker__query">{{ keyword || emptyLabel }}</span>
     </div>
@@ -171,6 +175,10 @@ defineExpose({
       :empty-label="noResultsLabel"
       @hover="activeIndex = $event"
       @select="choose"
-    />
+    >
+      <template v-if="$slots.item" #item="itemProps">
+        <slot name="item" v-bind="itemProps" :directive="directive" />
+      </template>
+    </ResourceList>
   </div>
 </template>

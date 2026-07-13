@@ -129,7 +129,7 @@ const template = {
 
 ## At Provider
 
-`atProviders` power the `@` Resource Picker. The composer only opens the picker, passes the keyword, and inserts the returned resource.
+`atProviders` power the `@` Resource Picker. The composer only opens the picker, passes the keyword, and inserts the returned resource. It is sugar over `directives`: when `directives` is omitted, `atProviders` is synthesized into the default `@` directive.
 
 ```ts
 interface AtProvider {
@@ -203,6 +203,103 @@ const slashProviders = [
 ]
 ```
 
+## Directives (generic triggers)
+
+`@` and `/` are not hardcoded — they are just two default entries in the `directives` array. You can add or remove triggers (`#`, `:`, ...) freely; the core parses them dynamically from `directives`, with no changes to the component.
+
+```ts
+interface Directive {
+  trigger: string                 // single trigger char, e.g. '@' '/' '#'
+  name?: string                   // name for debugging/events
+  mode?: 'resource' | 'command'   // default select behavior: insert chip / run command
+  providers: Provider[]           // data sources (same Provider contract)
+  emptyLabel?: string             // picker header hint with no keyword
+  noResultsLabel?: string         // empty-results hint
+  onSelect?: (item, ctx) => void | boolean
+  // Custom select behavior. Return false = prevent the default behavior
+  // (the trigger is still cleaned up and the menu closed); any other return
+  // value runs your logic and then still applies the mode default.
+  // ctx = { directive, trigger, keyword, surface: 'editor' }
+}
+```
+
+Example (three triggers):
+
+```js
+const directives = [
+  { trigger: '@', providers: atProviders },
+  { trigger: '/', providers: slashProviders },
+  { trigger: '#', name: 'tag', mode: 'resource', providers: tagProviders },
+]
+```
+
+```vue
+<PromptComposer :directives="directives" @submit="onSubmit" />
+```
+
+**Compatibility:** `atProviders` / `slashProviders` still work. When `directives` is omitted, they are synthesized into the default `@` (resource) and `/` (command) directives, so existing code needs no changes.
+
+## Customizing the echo (Slots)
+
+The component follows "core parsing + fully customizable UI": both token echoes and picker rows can be fully overridden via scoped slots. Serialization only reads `data-block`, so custom UI never affects the data model.
+
+| Slot | Scope | Description |
+| --- | --- | --- |
+| `#chip` | `{ block, surface }` | Custom rendering for each token in the editor. Internally uses a `contenteditable=false` atomic placeholder + `Teleport`, so caret / selection / serialization are unaffected. Falls back to the built-in "icon title". |
+| `#picker-item` | `{ item, active, directive }` | Custom rows for the `@` / `/` / any-trigger menu. Falls back to the built-in `ResourceItem`. |
+| `#toolbar-start` / `#toolbar-end` | none | Override the left / right sides of the bottom toolbar. |
+
+`<TokenContent />` also exposes a `#chip` slot (`{ block, surface: 'message', context }`) so the editor and message surfaces stay consistent.
+
+```vue
+<PromptComposer :directives="directives">
+  <template #chip="{ block }">
+    <span :class="`chip chip--${block.resource?.type || block.slot?.kind}`">
+      {{ block.resource?.icon }} {{ block.resource?.title }}
+    </span>
+  </template>
+  <template #picker-item="{ item, active, directive }">
+    <div :class="{ active }">
+      <img v-if="item.avatar" :src="item.avatar">
+      <span>{{ item.title }}</span>
+      <small>{{ directive.trigger }} · {{ item.type }}</small>
+    </div>
+  </template>
+</PromptComposer>
+```
+
+## Styling & portability
+
+The component is written with **Tailwind CSS v4**; all styles are inline utility classes in the templates, with **no `.css` file dependency**. Copy the whole `src/prompt-composer/` directory into any Vue 3 + Tailwind v4 project and it just works.
+
+- **Prerequisite:** the host project has Tailwind v4 installed and enabled (`@import "tailwindcss"`, with this directory in its content scan).
+- **Semantic class hooks:** every element keeps a semantic class alongside its utilities (e.g. `composer-chip`, `prompt-composer__editor`, `resource-item`, `composer-token--empty`), so you can override from the outside:
+
+  ```css
+  /* override chip appearance */
+  .composer-chip { border-radius: 6px; background: #eef; }
+  /* only empty slots */
+  .composer-token--empty { background: #fff0f0; }
+  ```
+
+- **Full takeover:** to replace the echo entirely, use the `#chip` / `#picker-item` slots. The semantic classes remain on the wrapper element, so both approaches compose.
+
+## Core parsing layer
+
+All UI-agnostic parsing lives in `src/prompt-composer/core/` and can be reused standalone (e.g. on the server or in tests):
+
+```js
+import {
+  parseTemplateToBlocks,   // template/clipboard text -> Block[]
+  blocksToClipboardText,   // Block[] -> template text
+  blocksToPlainText,       // Block[] -> plain text
+  serializeNodesToBlocks,  // DOM nodes -> Block[]
+  normalizeDirectives,     // props -> Directive[]
+  detectTriggerAtCaret,    // trigger detection at caret
+  defaultPresentation,     // default icon/title/description
+} from './prompt-composer'
+```
+
 ## `<PromptComposer />`
 
 The main editor component.
@@ -211,8 +308,9 @@ The main editor component.
 
 | Prop | Type | Default | Description |
 | --- | --- | --- | --- |
-| `atProviders` | `AtProvider[]` | `[]` | Data sources for the `@` picker. In Vue templates, use `at-providers`. |
-| `slashProviders` | `SlashProvider[]` | `[]` | Data sources for the `/` command menu. In Vue templates, use `slash-providers`. |
+| `directives` | `Directive[]` | `null` | Generic trigger array. When provided, it fully drives trigger behavior; otherwise `atProviders`/`slashProviders` synthesize the default `@`/`/`. See [Directives](#directives-generic-triggers). |
+| `atProviders` | `AtProvider[]` | `[]` | Data sources for the `@` picker (sugar over `directives`). In Vue templates, use `at-providers`. |
+| `slashProviders` | `SlashProvider[]` | `[]` | Data sources for the `/` command menu (sugar over `directives`). In Vue templates, use `slash-providers`. |
 | `tokenActions` | `TokenAction[] \| (block, context) => TokenAction[]` | `[]` | Popup menu items for tokens. |
 | `placeholder` | `string` | `'Ask Codex to code, explain, or inspect...'` | Editor placeholder. |
 | `running` | `boolean` | `false` | When `true`, the lower-right button becomes a stop button. |
@@ -268,6 +366,8 @@ Use a Vue ref:
 | `setTemplate(template)` | Parse and refill a template. Accepts `{ content, slots, attachments }` or a string. |
 | `parseTemplate(content, slotConfig?)` | Parse a template string into `Block[]`. |
 | `insertBlocks(blocks)` | Insert `Block[]` at the current caret position. |
+| `focus()` | Focus the editor. |
+| `openPicker()` | Open the matching menu if the caret is inside a trigger token. |
 
 Example:
 
@@ -345,8 +445,8 @@ On paste, the component first tries the full JSON payload. If it is unavailable,
 ```vue
 <script setup>
 import { ref } from 'vue'
-import PromptComposer from './components/PromptComposer.vue'
-import TokenContent from './components/TokenContent.vue'
+import { PromptComposer } from './prompt-composer'
+import { TokenContent } from './prompt-composer'
 
 const composerRef = ref(null)
 const messages = ref([])

@@ -4,7 +4,7 @@
 
 一个类 Codex/Cursor 的输入框组件：支持富文本编辑区（`contenteditable`）、`@` 唤起资源选择菜单、文件/文件夹附件、拖拽上传、中文输入法合成、以及**可异步加载**的资源 provider。
 
-- 组件路径：`src/components/PromptComposer.vue`
+- 组件路径：`src/prompt-composer/PromptComposer.vue`
 - 依赖子组件：`popup/ResourcePicker.vue`、`popup/ResourceList.vue`、`popup/ResourceItem.vue`
 - 图标库：`@lucide/vue`
 
@@ -30,7 +30,7 @@
 
 ```vue
 <script setup>
-import PromptComposer from './components/PromptComposer.vue'
+import { PromptComposer } from './prompt-composer'
 
 const providers = [
   {
